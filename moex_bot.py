@@ -2237,15 +2237,18 @@ async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None
 
     # Календарь — блокируем/предупреждаем перед важными событиями
     cal_check = check_calendar_block(ticker)
+    cal_penalty = cal_check.get("score_penalty", 0)
+    
     if cal_check["block"] and ("LONG" in final_signal or "SHORT" in final_signal):
         final_signal = f"🚫 {final_signal} — СТОП (важное событие через <30 мин)"
-    elif cal_check["score_penalty"] >= 15 and ("LONG" in final_signal or "SHORT" in final_signal):
+    elif cal_penalty >= 15 and ("LONG" in final_signal or "SHORT" in final_signal):
         # Сильное событие близко — понижаем итоговый сигнал
         if "CONFIRMED" in final_signal:
             final_signal = final_signal.replace("CONFIRMED", "WEAK ⚠️ (событие)")
+            
     # Снижаем tech_score на размер penalty (для фильтрации в сканере)
-    if cal_check["score_penalty"] > 0:
-        tech_score = max(0, tech_score - cal_check["score_penalty"])
+    if cal_penalty > 0:
+        tech_score = max(0, tech_score - cal_penalty)
 
     vp_supports    = ([vp_nodes["hvn_below"]["price"]] if vp_nodes.get("hvn_below") else []) + supports
     vp_resistances = ([vp_nodes["hvn_above"]["price"]] if vp_nodes.get("hvn_above") else []) + resistances
