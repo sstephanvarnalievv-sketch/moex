@@ -878,7 +878,7 @@ def get_upcoming_events(hours_ahead: int = 4) -> list:
 def check_calendar_block(ticker: str = "") -> dict:
     upcoming = get_upcoming_events(hours_ahead=2)
     if not upcoming:
-        return {"block": False, "warning": "", "events": []}
+        return {"block": False, "warning": "", "events": [], "score_penalty": 0}
     relevant = []
     for ev in upcoming:
         tickers = ev.get("tickers", [])
@@ -887,9 +887,23 @@ def check_calendar_block(ticker: str = "") -> dict:
                 or impact in ("high", "critical")):
             relevant.append(ev)
     if not relevant:
-        return {"block": False, "warning": "", "events": []}
+        return {"block": False, "warning": "", "events": [], "score_penalty": 0}
+        
     block_events = [e for e in relevant
                     if e["impact"] in ("high", "critical") and e["hours_ahead"] <= 0.5]
+                    
+    # Расчет штрафа для технического скора (score_penalty)
+    score_penalty = 0
+    for ev in relevant:
+        h = ev["hours_ahead"]
+        if h <= 2:  # Событие в пределах 2 часов
+            if ev["impact"] == "critical":
+                score_penalty = max(score_penalty, 25)
+            elif ev["impact"] == "high":
+                score_penalty = max(score_penalty, 15)
+            elif ev["impact"] == "medium":
+                score_penalty = max(score_penalty, 5)
+
     warnings = []
     for ev in relevant[:3]:
         h = ev["hours_ahead"]
@@ -897,7 +911,13 @@ def check_calendar_block(ticker: str = "") -> dict:
                     f"через {h*60:.0f} мин" if h < 1 else f"через {h:.1f} ч")
         imp_e = {"critical": "\U0001f534", "high": "\U0001f7e0", "medium": "\U0001f7e1"}.get(ev["impact"], "\u26aa")
         warnings.append(f"{imp_e} {ev['name']} — {time_str}")
-    return {"block": len(block_events) > 0, "warning": "\n".join(warnings), "events": relevant}
+        
+    return {
+        "block": len(block_events) > 0, 
+        "warning": "\n".join(warnings), 
+        "events": relevant,
+        "score_penalty": score_penalty
+    }
 
 async def fetch_moex_dividends() -> list:
     events = []
