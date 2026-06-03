@@ -486,9 +486,16 @@ async def monitor_trades_loop(app, fetch_price_fn):
             if open_trades:
                 for trade_id, t in list(open_trades.items()):
                     ticker = t["ticker"]
-                    if ticker not in MOEX_STOCKS:
+                    figi = None
+                    # Проверяем как в акциях, так и во фьючерсах
+                    if ticker in MOEX_STOCKS:
+                        figi = MOEX_STOCKS[ticker][0]
+                    elif ticker in FUTURES:
+                        figi = FUTURES[ticker][0]
+
+                    if not figi:
                         continue
-                    figi = MOEX_STOCKS[ticker][0]
+
                     price = await fetch_price_fn(figi)
                     if not price:
                         continue
