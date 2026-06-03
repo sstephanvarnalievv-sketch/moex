@@ -4116,9 +4116,25 @@ async def run_scanner_broadcast(app):
         lines.append(_format_scan_row(s))
         lines.append("")
     text = "\n".join(lines)
+
+    # Генерация кнопок быстрого добавления сделок для автоматических уведомлений
+    kb = []
+    for s in new_sigs[:5]:
+        sl_tp = s.get("sl_tp", {})
+        if sl_tp and sl_tp.get("sl"):
+            direction = "LONG" if "LONG" in s["tech_signal"] else "SHORT"
+            p  = s["price"]; sl = sl_tp.get("sl", 0)
+            t1 = sl_tp.get("tp1", 0); t2 = sl_tp.get("tp2", 0); t3 = sl_tp.get("tp3", 0)
+            fmt = ".4f" if s.get("is_futures") else ".2f"
+            kb.append([InlineKeyboardButton(
+                f"✅ Войти {s['ticker']} ({direction})",
+                callback_data=f"enter_{s['ticker']}_{direction}_{p:{fmt}}_{sl:{fmt}}_{t1:{fmt}}_{t2:{fmt}}_{t3:{fmt}}"
+            )])
+    markup = InlineKeyboardMarkup(kb) if kb else None
+
     for chat_id in SCANNER_CHAT_IDS:
         try:
-            await app.bot.send_message(chat_id, text, parse_mode="HTML")
+            await app.bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=markup)
         except Exception as e:
             logger.warning(f"Broadcast failed for {chat_id}: {e}")
 
