@@ -4258,12 +4258,24 @@ async def _calendar_loop():
 
 
 async def post_init(app):
-    # Подгружаем FIGI из файла при старте
+    # 1. Принудительно удаляем старый кэш при старте на Railway, чтобы очистить старые неверные цены
+    if FIGI_FILE.exists():
+        try:
+            FIGI_FILE.unlink()
+            logger.info("Startup: old figi_result.json programmatically deleted.")
+        except Exception as e:
+            logger.warning(f"Startup: failed to delete old cache file: {e}")
+
+    # Подгружаем FIGI из файла (сейчас вернет 0, так как файл удален)
     loaded = _load_figi_from_file()
     if loaded:
         logger.info(f"Startup: loaded {loaded} FIGIs from file")
     else:
-        logger.warning("Startup: figi_result.json not found. Run /update_figi")
+        logger.warning("Startup: cache cleared, starting fresh.")
+
+    # 2. Автоматически запускаем обновление базы FIGI (акции, GDR и фьючерсы) в фоновом режиме
+    # Теперь вам не нужно вручную писать команду /update_figi после каждого деплоя
+    asyncio.create_task(update_figi_data())
 
     # Сразу обновляем календарь при старте
     asyncio.create_task(auto_update_calendar())
