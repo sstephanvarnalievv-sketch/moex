@@ -2540,8 +2540,8 @@ async def fetch_nearest_futures() -> dict:
 
 async def update_figi_data() -> tuple[int | None, str | None]:
     """
-    Запрашивает актуальные FIGI у Tinkoff API,
-    сохраняет в figi_result.json и обновляет MOEX_STOCKS в памяти.
+    Запрашивает актуальные FIGI у Tinkoff API для акций, депозитарных расписок и фьючерсов,
+    сохраняет в figi_result.json и обновляет в памяти.
     """
     headers = {
         "Authorization": f"Bearer {TINKOFF_TOKEN}",
@@ -2549,30 +2549,42 @@ async def update_figi_data() -> tuple[int | None, str | None]:
     }
     try:
         timeout = aiohttp.ClientTimeout(total=30)
+        api_index = {}
+
         async with aiohttp.ClientSession(timeout=timeout) as session:
+            # 1. Запрашиваем обычные акции (Shares)
             async with session.post(
                 f"{TINKOFF_API}/tinkoff.public.invest.api.contract.v1.InstrumentsService/Shares",
                 headers=headers, json={"instrumentStatus": "INSTRUMENT_STATUS_BASE"},
-            ) as r:
-                if r.status != 200:
-                    return None, f"API Error: {r.status}"
-                data = await r.json()
+            ) as r1:
+                if r1.status == 200:
+                    shares_data = await r1.json()
+                    for inst in shares_data.get("instruments", []):
+                        ticker = inst.get("ticker", "")
+                        if ticker and inst.get("figi"):
+                            api_index[ticker] = {
+                                "figi": inst["figi"],
+                                "name": inst.get("name", ""),
+                                "uid":  inst.get("uid", ""),
+                            }
 
-        instruments = data.get("instruments", [])
-        # Индексируем всё с MOEX
-        api_index = {}
-        for inst in instruments:
-            ticker   = inst.get("ticker", "")
-            exchange = inst.get("exchange", "")
-            currency = inst.get("currency", "")
-            if exchange in ("MOEX", "MOEX_PLUS") and currency == "rub" and inst.get("figi"):
-                api_index[ticker] = {
-                    "figi": inst["figi"],
-                    "name": inst.get("name", ""),
-                    "uid":  inst.get("uid", ""),
-                }
+            # 2. Запрашиваем депозитарные расписки (важно для CIAN, FIVE, AGRO, OZON и др.)
+            async with session.post(
+                f"{TINKOFF_API}/tinkoff.public.invest.api.contract.v1.InstrumentsService/DepositoryReceipts",
+                headers=headers, json={"instrumentStatus": "INSTRUMENT_STATUS_BASE"},
+            ) as r2:
+                if r2.status == 200:
+                    dr_data = await r2.json()
+                    for inst in dr_data.get("instruments", []):
+                        ticker = inst.get("ticker", "")
+                        if ticker and inst.get("figi"):
+                            api_index[ticker] = {
+                                "figi": inst["figi"],
+                                "name": inst.get("name", ""),
+                                "uid":  inst.get("uid", ""),
+                            }
 
-        # Обновляем MOEX_STOCKS в памяти
+        # Обновляем MOEX_STOCKS в памяти без жестких фильтров по биржам
         updated, not_found = [], []
         for ticker in list(MOEX_STOCKS.keys()):
             if ticker in api_index:
@@ -2582,39 +2594,35 @@ async def update_figi_data() -> tuple[int | None, str | None]:
             else:
                 not_found.append(ticker)
 
-        # Также обновляем FUTURES через отдельный запрос (GetFutures)
+        # 3. Обновляем фьючерсы через GetFutures
         fut_updated = 0
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(
                     f"{TINKOFF_API}/tinkoff.public.invest.api.contract.v1.InstrumentsService/Futures",
                     headers=headers, json={"instrumentStatus": "INSTRUMENT_STATUS_BASE"},
-                ) as r2:
-                    if r2.status == 200:
-                        fdata = await r2.json()
+                ) as r3:
+                    if r3.status == 200:
+                        fdata = await r3.json()
                         fut_index = {
-                            i.get("ticker",""): i.get("figi","")
+                            i.get("ticker", ""): i.get("figi", "")
                             for i in fdata.get("instruments", [])
-                            if i.get("exchange","") in ("MOEX","FORTS","FORTS_EVENING")
-                            and i.get("figi")
+                            if i.get("figi")
                         }
                         for code in list(FUTURES.keys()):
                             if code in fut_index:
                                 old = FUTURES[code]
                                 FUTURES[code] = (fut_index[code],) + old[1:]
                                 fut_updated += 1
-                        # Дописываем в файл
+                        # Дописываем фьючерсы в общий индекс для файла кеша
                         api_index.update({k: {"figi": v} for k, v in fut_index.items()})
         except Exception as fe:
-            logger.warning(f"Futures FIGI update: {fe}")
+            logger.warning(f"Futures FIGI update error: {fe}")
 
-        # Сохраняем в файл (для следующего запуска)
+        # Сохраняем объединенную чистую базу в файл
         FIGI_FILE.write_text(json.dumps(api_index, indent=2, ensure_ascii=False))
 
-        logger.info(f"FIGI updated: акции {len(updated)} OK, фьючерсы {fut_updated} OK")
-        if not_found:
-            logger.warning(f"Акции не найдены в API: {not_found}")
-
+        logger.info(f"FIGI updated successfully: stocks & GDR {len(updated)} OK, futures {fut_updated} OK")
         return len(updated) + fut_updated, None
 
     except Exception as e:
