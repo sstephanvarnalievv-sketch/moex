@@ -4223,7 +4223,12 @@ async def run_futures_broadcast(app):
             await app.bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=markup)
         except Exception as e:
             logger.warning(f"Futures broadcast {chat_id}: {e}")
+
+
+async def scanner_loop(app):
+    """Главный фоновый цикл сканера рынка."""
     global _last_broadcast_signals
+    global _last_futures_signals
     while True:
         try:
             day, hour, minute = get_msk_time()
