@@ -4569,10 +4569,20 @@ async def post_init(app):
     else:
         logger.warning("Startup: cache cleared, starting fresh.")
 
-    asyncio.create_task(auto_update_figi_loop())
-    asyncio.create_task(auto_update_calendar())
-    asyncio.create_task(fetch_nearest_futures())
+    # Обновляем FIGI при старте и запускаем периодическое обновление
+    try:
+        await update_figi_data()
+        logger.info("Startup: FIGI data refreshed")
+    except Exception as e:
+        logger.warning(f"Startup: initial FIGI update failed: {e}")
 
+    try:
+        await fetch_nearest_futures()
+        logger.info("Startup: futures FIGI refreshed")
+    except Exception as e:
+        logger.warning(f"Startup: futures FIGI update failed: {e}")
+
+    asyncio.create_task(auto_update_calendar())
     asyncio.create_task(scanner_loop(app))
     asyncio.create_task(monitor_trades_loop(app, fetch_last_price_tinkoff))
     asyncio.create_task(_calendar_loop())
