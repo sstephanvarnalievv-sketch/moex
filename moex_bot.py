@@ -6081,8 +6081,15 @@ def main():
     if not TELEGRAM_TOKEN:
         raise RuntimeError("TELEGRAM_TOKEN отсутствует в настройках среды.")
 
-    # Redis persistence — chat_data (last_analysis_*) переживает рестарты
-    persistence = RedisChatDataPersistence() if REDIS_URL else None
+    # Используем персистентность только если переменная REDIS_URL задана корректно
+    persistence = None
+    if REDIS_URL and (REDIS_URL.startswith("redis://") or REDIS_URL.startswith("rediss://")):
+        try:
+            persistence = RedisChatDataPersistence()
+            logger.info("Применение RedisChatDataPersistence для сохранения сессий")
+        except Exception as pe:
+            logger.warning(f"Не удалось инициализировать RedisChatDataPersistence: {pe}")
+            persistence = None
 
     builder = (
         Application.builder()
@@ -6097,6 +6104,7 @@ def main():
         builder = builder.persistence(persistence)
 
     application = builder.build()
+```
 
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("menu", cmd_menu))
