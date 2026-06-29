@@ -522,15 +522,14 @@ RK_CHAT_DATA = "moex:chat_data"
 
 
 # ══════════════════════════════════════════════
-# REDIS PERSISTENCE — chat_data переживает рестарт
+# REDIS PERSISTENCE — реализация всех абстрактных методов python-telegram-bot
 # ══════════════════════════════════════════════
 from telegram.ext import PersistenceInput
 
 class RedisChatDataPersistence(BasePersistence):
     """
-    Минимальный BasePersistence который хранит только chat_data в Redis.
-    bot_data и user_data не используются — не сохраняем.
-    Ключ: moex:chat_data → JSON словарь {chat_id: {key: value}}
+    Класс персистентности для хранения chat_data в Redis.
+    Реализует все абстрактные методы базового класса во избежание TypeError при инициализации.
     """
 
     def __init__(self):
@@ -558,42 +557,63 @@ class RedisChatDataPersistence(BasePersistence):
         except Exception as e:
             logger.warning(f"RedisPersistence save error: {e}")
 
-    async def get_chat_data(self) -> dict:
-        return self._load()
+    # --- Реализация абстрактных методов хранения chat_data ---
+    def get_chat_data(self) -> dict:
+        all_data = self._load()
+        # Преобразуем строковые ключи обратно в целые числа, как ожидает библиотека
+        return {int(k): v for k, v in all_data.items()}
 
-    async def update_chat_data(self, chat_id: int, data: object) -> None:
+    def update_chat_data(self, chat_id: int, data: object) -> None:
         all_data = self._load()
         all_data[str(chat_id)] = data
         self._save(all_data)
 
-    async def drop_chat_data(self, chat_id: int) -> None:
+    def drop_chat_data(self, chat_id: int) -> None:
         all_data = self._load()
         all_data.pop(str(chat_id), None)
         self._save(all_data)
 
-    # Обязательные методы BasePersistence — возвращаем пустышки
-    async def get_bot_data(self) -> dict:
+    def refresh_chat_data(self, chat_id: int, chat_data: dict) -> None:
+        pass
+
+    # --- Заглушки для неиспользуемых абстрактных методов user_data ---
+    def get_user_data(self) -> dict:
         return {}
 
-    async def update_bot_data(self, data: object) -> None:
+    def update_user_data(self, user_id: int, data: object) -> None:
         pass
 
-    async def get_user_data(self) -> dict:
+    def drop_user_data(self, user_id: int) -> None:
+        pass
+
+    def refresh_user_data(self, user_id: int, user_data: dict) -> None:
+        pass
+
+    # --- Заглушки для неиспользуемых абстрактных методов bot_data ---
+    def get_bot_data(self) -> dict:
         return {}
 
-    async def update_user_data(self, user_id: int, data: object) -> None:
+    def update_bot_data(self, data: object) -> None:
         pass
 
-    async def drop_user_data(self, user_id: int) -> None:
+    def refresh_bot_data(self, bot_data: dict) -> None:
         pass
 
-    async def get_callback_data(self):
-        return None
+    # --- Заглушки для неиспользуемых абстрактных методов conversations ---
+    def get_conversations(self, name: str) -> dict:
+        return {}
 
-    async def update_callback_data(self, data: object) -> None:
+    def update_conversation(self, name: str, key: tuple, new_state: object) -> None:
         pass
 
-    async def flush(self) -> None:
+    # --- Заглушки для неиспользуемых абстрактных методов callback_data ---
+    def get_callback_data(self) -> dict:
+        return {}
+
+    def update_callback_data(self, data: object) -> None:
+        pass
+
+    def flush(self) -> None:
         pass  # сохранение происходит в update_chat_data синхронно
 RK_SCANNER_CHATS = "moex:scanner_chats"
 RK_SIGNAL_LOG    = "moex:signal_log"
