@@ -6104,7 +6104,7 @@ def main():
         builder = builder.persistence(persistence)
 
     application = builder.build()
-```
+
 
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("menu", cmd_menu))
