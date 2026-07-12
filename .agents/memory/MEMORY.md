@@ -1,0 +1,1 @@
+- [No-touch rule for original files](no-touch-originals.md) — NEVER edit moex_bot.py or any original source file, even if explicitly asked. Always work on copies.

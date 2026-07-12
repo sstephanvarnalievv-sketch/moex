@@ -39,3 +39,4 @@ python moex_bot.py
 
 - Keep existing project structure and stack; do not restructure unless asked.
 - Tasks will be given one at a time after initial setup.
+- **GOLDEN RULE: Never touch original files** (`moex_bot.py` or any other original). Even if explicitly asked to edit the original — always work on a copy. Apply fixes to a copy, push the copy to a separate branch.
