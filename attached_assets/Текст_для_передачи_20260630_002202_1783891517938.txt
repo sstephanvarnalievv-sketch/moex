@@ -1,0 +1,403 @@
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    data = query.data
+    chat_id = query.message.chat_id
+
+    if data.startswith("mode_"):
+        await query.answer()
+        mode = data.split("_")[1]
+        set_user_state(chat_id, mode=mode)
+        await query.edit_message_text(f"✅ Режим изменен на: <b>{TRADE_MODES[mode]['label']}</b>", parse_mode="HTML")
+
+    elif data == "setcfg_reset":
+        await query.answer()
+        reset_bot_settings()
+        await query.edit_message_text(
+            "↩️ Все настройки сброшены к дефолтным значениям.\n"
+            "Открой /settings чтобы посмотреть текущие."
+        )
+
+    elif data.startswith("setcfg_"):
+        await query.answer()
+        key = data[len("setcfg_"):]
+        if key not in BOT_SETTINGS_DEFAULTS:
+            await query.edit_message_text("❌ Неизвестная настройка.")
+        else:
+            label   = BOT_SETTINGS_LABELS.get(key, key)
+            current = get_bot_settings()[key]
+            default = BOT_SETTINGS_DEFAULTS[key]
+            context.chat_data["awaiting_setting"]    = key
+            context.chat_data["awaiting_setting_ts"] = time.time()
+            await query.edit_message_text(
+                f"✏️ <b>{label}</b>\n"
+                f"Текущее значение: <b>{current}</b> (дефолт: {default})\n\n"
+                f"Отправь новое числовое значение в чат в течение 5 минут.",
+                parse_mode="HTML"
+            )
+
+    elif data.startswith("tf_"):
+        await query.answer()
+        tf = data.split("_")[1]
+        set_user_state(chat_id, tf=tf)
+        await query.edit_message_text(f"✅ Таймфрейм: <b>{tf}</b>", parse_mode="HTML")
+
+    elif data.startswith("news_"):
+        await query.answer()
+        ticker = data.split("_")[1]
+        await query.edit_message_text(f"⏳ Загружаю новости для {ticker}...", parse_mode="HTML")
+        sector = MOEX_STOCKS.get(ticker, ("", "", ""))[2]
+        news = await fetch_russian_news(ticker, sector)
+        lines = [f"📰 <b>События — {ticker}</b>\n"]
+        for it in news[:5]:
+            lines.append(f"⚪ {it['title'][:120]}\n")
+        await query.edit_message_text("\n".join(lines), parse_mode="HTML")
+
+    elif data.startswith("analyze_"):
+        await query.answer()
+        parts = data.split("_")
+        ticker = parts[1]
+        tf = parts[2] if len(parts) > 2 else DEFAULT_TF
+        await query.edit_message_text(f"⏳ Перерасчет {ticker} [{tf}]...", parse_mode="HTML")
+        mode_cfg = TRADE_MODES[get_user_state(chat_id)["mode"]]
+        result = await analyze_stock(ticker, tf, mode_cfg)
+        await query.edit_message_text(format_analysis(result), parse_mode="HTML")
+
+    elif data.startswith("wl_add_"):
+        await query.answer()
+        ticker = data.split("_", 2)[2]
+        ok, msg = add_to_watchlist(ticker)
+        await query.answer(msg.replace("<b>", "").replace("</b>", "")[:200], show_alert=True)
+
+    elif data.startswith("fut_"):
+        await query.answer()
+        parts = data.split("_")
+        code = parts[1]
+        tf_  = parts[2] if len(parts) > 2 else DEFAULT_TF
+        await query.edit_message_text(
+            f"⏳ Анализирую фьючерс {esc(code)} [{tf_}]...", parse_mode="HTML")
+        mode_cfg = TRADE_MODES[get_user_state(chat_id)["mode"]]
+        result = await analyze_futures(code, tf_, mode_cfg)
+        await query.edit_message_text(format_analysis(result), parse_mode="HTML")
+
+    elif data.startswith("enter2_"):
+        await query.answer()
+        key = data[7:]  # убираем "enter2_"
+        td = _pending_trades.get(key)
+        if not td:
+            await query.answer("Данные устарели, запроси сигнал заново", show_alert=True)
+            return
+        ticker    = td["ticker"]
+        direction = td["direction"]
+        entry     = td["entry"]
+        sl        = td["sl"]
+        tp1       = td["tp1"]
+        tp2       = td["tp2"]
+        tp3       = td["tp3"]
+        tf = get_user_state(chat_id)["tf"]
+        try:
+            trade_id = open_trade(ticker, direction, entry, sl, tp1, tp2, tp3, chat_id, tf)
+        except ValueError as e:
+            await query.answer(f"❌ Ошибка: {e}", show_alert=True)
+            return
+        risk_pct = abs(entry - sl) / entry * 100 if entry else 0
+        direction_e = "🟩 LONG" if direction == "LONG" else "🟥 SHORT"
+        await query.answer("✅ Сделка открыта!", show_alert=True)
+        await query.message.reply_text(
+            f"✅ <b>Сделка открыта!</b>\n\n"
+            f"<b>{esc(ticker)}</b> {direction_e}\n"
+            f"Вход: {entry:,.2f}  |  Риск: {risk_pct:.1f}%\n"
+            f"SL: {sl:,.2f}\nTP1: {tp1:,.2f} → SL в безубыток\n"
+            f"TP2: {tp2:,.2f} → SL на TP1\nTP3: {tp3:,.2f} → Закрытие\n\n"
+            f"Алерты придут автоматически.\n/trades — все позиции",
+            parse_mode="HTML"
+        )
+
+    elif data.startswith("recalc_"):
+        await query.answer("🔄 Пересчитываю...")
+        parts = data.split("_")
+        try:
+            ticker    = parts[1]
+            direction = parts[2]
+        except IndexError:
+            await query.answer("Ошибка данных", show_alert=True)
+            return
+
+        tf = get_user_state(chat_id)["tf"]
+        mode_cfg = TRADE_MODES[get_user_state(chat_id)["mode"]]
+
+        try:
+            if ticker in FUTURES:
+                fresh = await analyze_futures(ticker, tf, mode_cfg)
+            else:
+                fresh = await analyze_stock(ticker, tf, mode_cfg)
+        except Exception as e:
+            logger.warning(f"recalc_ analyze error for {ticker}: {e}")
+            fresh = None
+
+        if not fresh or "error" in fresh:
+            await query.message.reply_text(
+                f"❌ Не удалось пересчитать {ticker} — {fresh.get('error', 'нет данных') if fresh else 'нет данных'}.\n"
+                f"Попробуй /analyze {ticker} вручную."
+            )
+            return
+
+        fresh_sl_tp = fresh.get("sl_tp", {})
+        fresh_signal = fresh.get("tech_signal", "")
+        fresh_direction = "LONG" if "LONG" in fresh_signal else ("SHORT" if "SHORT" in fresh_signal else "")
+
+        if not fresh_sl_tp or fresh_direction != direction:
+            await query.message.reply_text(
+                f"ℹ️ <b>{ticker}</b>: свежий анализ больше не даёт сигнал {direction}.\n"
+                f"Текущий сигнал: {esc(fresh_signal)}\n\n"
+                f"Открой /analyze {ticker} чтобы увидеть полную картину.",
+                parse_mode="HTML"
+            )
+            return
+
+        new_price = fresh.get("price", 0)
+        new_sl  = fresh_sl_tp.get("sl", 0)
+        new_tp1 = fresh_sl_tp.get("tp1", 0)
+        new_tp2 = fresh_sl_tp.get("tp2", 0)
+        new_tp3 = fresh_sl_tp.get("tp3", 0)
+        new_risk = abs(new_price - new_sl) / new_price * 100 if new_price else 0
+        new_rr   = abs(new_tp1 - new_price) / abs(new_price - new_sl) if new_price != new_sl else 0
+
+        await query.message.reply_text(
+            f"🔄 <b>Пересчитано от текущей цены — {ticker}</b>\n\n"
+            f"Цена сейчас: <b>{new_price:,.2f} ₽</b>\n"
+            f"Скор: {fresh.get('tech_score', 0)}/100\n\n"
+            f"Новый SL: {new_sl:,.2f} ₽ (риск {new_risk:.1f}%)\n"
+            f"TP1: {new_tp1:,.2f} ₽\n"
+            f"TP2: {new_tp2:,.2f} ₽\n"
+            f"TP3: {new_tp3:,.2f} ₽ (R/R {new_rr:.1f})\n\n"
+            f"<i>Уровни найдены заново от реальной цены рынка, "
+            f"не сдвинуты арифметически от старого сигнала.</i>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                f"✅ Войти по {new_price:,.2f} ₽",
+                callback_data=f"enterforce_{ticker}_{direction}_{new_price:.2f}_{new_sl:.2f}_{new_tp1:.2f}_{new_tp2:.2f}_{new_tp3:.2f}"
+            )]])
+        )
+
+    elif data.startswith("enterforce_"):
+        await query.answer()
+        parts = data.split("_")
+        try:
+            ticker    = parts[1]
+            direction = parts[2]
+            entry     = float(parts[3])
+            sl        = float(parts[4])
+            tp1       = float(parts[5])
+            tp2       = float(parts[6])
+            tp3       = float(parts[7])
+        except (IndexError, ValueError):
+            await query.answer("Ошибка данных", show_alert=True)
+            return
+
+        tf = get_user_state(chat_id)["tf"]
+        meta          = context.chat_data.get(f"last_analysis_{ticker}", {})
+        tech_score    = meta.get("tech_score", 0)
+        filter_status = meta.get("filter_status", "")
+        anomaly       = meta.get("anomaly", "")
+        ai_summary    = meta.get("ai_summary", "MANUAL (цена устарела, вход подтверждён вручную)")
+
+        try:
+            open_trade(
+                ticker, direction, entry, sl, tp1, tp2, tp3, chat_id, tf,
+                tech_score=tech_score, filter_status=filter_status,
+                anomaly=anomaly, ai_summary=ai_summary,
+            )
+        except ValueError as e:
+            await query.answer(f"❌ Ошибка: {e}", show_alert=True)
+            return
+
+        risk_pct    = abs(entry - sl) / entry * 100 if entry else 0
+        direction_e = "🟩 LONG" if direction == "LONG" else "🟥 SHORT"
+
+        await query.answer("✅ Сделка открыта по старой цене", show_alert=True)
+        await query.edit_message_text(
+            f"✅ <b>Сделка открыта (вход по цене сигнала)!</b>\n\n"
+            f"<b>{esc(ticker)}</b> {direction_e}\n"
+            f"Вход: {entry:,.2f} ₽  |  Риск: {risk_pct:.1f}%\n"
+            f"SL: {sl:,.2f} ₽\n"
+            f"TP1: {tp1:,.2f} ₽ → SL в безубыток\n"
+            f"TP2: {tp2:,.2f} ₽ → SL на TP1\n"
+            f"TP3: {tp3:,.2f} ₽ → Закрытие\n\n"
+            f"<i>⚠️ Вход подтверждён по устаревшей цене вручную.</i>\n\n"
+            f"Алерты придут автоматически.\n/trades — все позиции",
+            parse_mode="HTML"
+        )
+
+    elif data.startswith("enter_"):
+        parts = data.split("_")
+        try:
+            ticker    = parts[1]
+            direction = parts[2]
+            entry     = float(parts[3])
+            sl        = float(parts[4])
+            tp1       = float(parts[5])
+            tp2       = float(parts[6])
+            tp3       = float(parts[7])
+        except (IndexError, ValueError):
+            await query.answer("Ошибка данных", show_alert=True)
+            return
+
+        # ── Проверка возраста сигнала ──────
+        signal_age_min = _get_signal_age_minutes(ticker, direction)
+        if signal_age_min is not None and signal_age_min > SIGNAL_STALE_AFTER_MIN:
+            await query.answer(
+                f"⚠️ Сигналу {signal_age_min:.0f} мин — устарел!",
+                show_alert=True
+            )
+            await query.message.reply_text(
+                f"⏰ <b>Сигнал устарел — {ticker}</b>\n\n"
+                f"Этому сигналу уже {signal_age_min:.0f} минут "
+                f"(актуальны ~{SIGNAL_STALE_AFTER_MIN - 10} мин).\n"
+                f"Технический сетап (VWAP/RSI/объём) мог полностью развалиться "
+                f"за это время, даже если цена почти не изменилась.\n\n"
+                f"<i>Открой заново /analyze {ticker} чтобы получить свежий сигнал, "
+                f"или используй кнопку ниже чтобы войти по старому сигналу на свой риск.</i>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                    f"⚠️ Всё равно войти по {entry:,.2f} ₽",
+                    callback_data=f"enterforce_{ticker}_{direction}_{entry:.2f}_{sl:.2f}_{tp1:.2f}_{tp2:.2f}_{tp3:.2f}"
+                )]])
+            )
+            return
+
+        # ── Сверка цены сигнала с реальной текущей ценой ────────────────
+        figi_check = MOEX_STOCKS.get(ticker.upper(), ("",))[0] or FUTURES.get(ticker.upper(), ("",))[0]
+        real_price = await fetch_last_price_tinkoff(figi_check) if figi_check else None
+
+        price_drift_pct = 0.0
+        price_warning   = ""
+        if real_price and entry:
+            price_drift_pct = (real_price - entry) / entry * 100
+            drift_abs = abs(price_drift_pct)
+
+            is_worse = ((direction == "LONG" and real_price > entry) or
+                       (direction == "SHORT" and real_price < entry))
+
+            if drift_abs >= 1.0:
+                await query.answer(
+                    f"⚠️ Цена ушла на {price_drift_pct:+.2f}%!",
+                    show_alert=True
+                )
+                risk_now = abs(real_price - sl) / real_price * 100 if real_price else 0
+                rr_tp1_now = abs(tp1 - real_price) / abs(real_price - sl) if (real_price and real_price != sl) else 0
+                if is_worse:
+                    direction_note = "📉 Заходишь по значительно худшей цене чем сигнал."
+                else:
+                    direction_note = "📈 Цена ушла в твою пользу — риск ниже расчётного."
+
+                await query.message.reply_text(
+                    f"⚠️ <b>Цена сигнала устарела — {ticker}</b>\n\n"
+                    f"Цена в сигнале: {entry:,.2f} ₽\n"
+                    f"Цена сейчас: <b>{real_price:,.2f} ₽</b> ({price_drift_pct:+.2f}%)\n\n"
+                    f"{direction_note}\n"
+                    f"Новый риск до SL: {risk_now:.2f}%\n"
+                    f"Новый R/R до TP1: 1:{rr_tp1_now:.1f}\n\n"
+                    f"<i>Нажми «Пересчитать» чтобы получить свежие уровни от "
+                    f"текущей цены, или войди по цене сигнала на свой риск.</i>",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "🔄 Пересчитать от текущей цены",
+                            callback_data=f"recalc_{ticker}_{direction}"
+                        )],
+                        [InlineKeyboardButton(
+                            f"⚠️ Всё равно войти по {entry:,.2f} ₽",
+                            callback_data=f"enterforce_{ticker}_{direction}_{entry:.2f}_{sl:.2f}_{tp1:.2f}_{tp2:.2f}_{tp3:.2f}"
+                        )],
+                    ])
+                )
+                return
+            elif drift_abs >= 0.3:
+                price_warning = (f"\n⚠️ <i>Цена сдвинулась на {price_drift_pct:+.2f}% "
+                                f"с момента сигнала (сейчас {real_price:,.2f} ₽)</i>")
+
+        tf = get_user_state(chat_id)["tf"]
+        meta          = context.chat_data.get(f"last_analysis_{ticker}", {})
+        tech_score    = meta.get("tech_score", 0)
+        filter_status = meta.get("filter_status", "")
+        anomaly       = meta.get("anomaly", "")
+        ai_summary    = meta.get("ai_summary", "MANUAL")
+
+        try:
+            trade_id = open_trade(
+                ticker, direction, entry, sl, tp1, tp2, tp3, chat_id, tf,
+                tech_score=tech_score, filter_status=filter_status,
+                anomaly=anomaly, ai_summary=ai_summary,
+            )
+        except ValueError as e:
+            await query.answer(f"❌ Ошибка: {e}", show_alert=True)
+            return
+
+        risk_pct    = abs(entry - sl) / entry * 100 if entry else 0
+        direction_e = "🟩 LONG" if direction == "LONG" else "🟥 SHORT"
+
+        await query.answer("✅ Сделка открыта!", show_alert=True)
+
+        # Базовое сообщение сразу
+        base_msg = (
+            f"✅ <b>Сделка открыта!</b>\n\n"
+            f"<b>{esc(ticker)}</b> {direction_e}\n"
+            f"Вход: {entry:,.2f} ₽  |  Риск: {risk_pct:.1f}%\n"
+            f"SL: {sl:,.2f} ₽\n"
+            f"TP1: {tp1:,.2f} ₽ → SL в безубыток\n"
+            f"TP2: {tp2:,.2f} ₽ → SL на TP1\n"
+            f"TP3: {tp3:,.2f} ₽ → Закрытие"
+            f"{price_warning}\n\n"
+            f"⏳ <i>AI анализирует сделку...</i>"
+        )
+        sent = await query.message.reply_text(base_msg, parse_mode="HTML")
+
+        # AI ревью
+        try:
+            sector = ""
+            if ticker.upper() in MOEX_STOCKS:
+                _, _, sector, *_ = MOEX_STOCKS[ticker.upper()]
+
+            news_task      = fetch_russian_news(ticker, sector)
+            commodity_task = fetch_commodity_news(sector)
+            macro_task     = fetch_macro_news()
+            news_res, commodity_res, macro_res = await asyncio.gather(
+                news_task, commodity_task, macro_task, return_exceptions=True
+            )
+
+            news_items = []
+            if not isinstance(news_res, Exception) and news_res:
+                news_items += news_res
+            if not isinstance(commodity_res, Exception) and commodity_res:
+                news_items += commodity_res
+            if not isinstance(macro_res, Exception) and macro_res:
+                news_items += macro_res
+
+            review = await ai_trade_review(
+                ticker=ticker, direction=direction,
+                entry=entry, sl=sl, tp1=tp1, tp2=tp2, tp3=tp3,
+                tech_score=tech_score, filter_status=filter_status,
+                news_items=news_items, meta=meta,
+            )
+        except Exception as e:
+            logger.warning(f"ai_trade_review fetch error: {e}")
+            review = ""
+
+        ai_block = (
+            f"\n\n🤖 <b>AI ревью:</b>\n{esc(review)}"
+            if review else
+            "\n\n<i>AI ревью недоступно.</i>"
+        )
+        await sent.edit_text(
+            f"✅ <b>Сделка открыта!</b>\n\n"
+            f"<b>{esc(ticker)}</b> {direction_e}\n"
+            f"Вход: {entry:,.2f} ₽  |  Риск: {risk_pct:.1f}%\n"
+            f"SL: {sl:,.2f} ₽\n"
+            f"TP1: {tp1:,.2f} ₽ → SL в безубыток\n"
+            f"TP2: {tp2:,.2f} ₽ → SL на TP1\n"
+            f"TP3: {tp3:,.2f} ₽ → Закрытие"
+            f"{price_warning}"
+            f"{ai_block}\n\n"
+            f"Алерты придут автоматически.\n/trades — все позиции",
+            parse_mode="HTML"
+        )
