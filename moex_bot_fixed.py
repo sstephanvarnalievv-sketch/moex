@@ -7913,6 +7913,12 @@ async def run_news_driven_scan(app):
             except Exception as e:
                 logger.debug(f"quick sl_tp for news {ticker}: {e}")
 
+    # Если все тикеры были пропущены (price=0 / недоступны в API) — не слать пустой заголовок
+    HEADER_LINES = 3  # ["📰 НОВОСТНОЙ ТРИГГЕР...", "<i>Анализ...</i>", ""]
+    if len(lines) <= HEADER_LINES:
+        logger.debug("news_trigger: все тикеры пропущены (нет данных свечей), сообщение не отправляем")
+        return
+
     text   = "\n".join(lines)
     markup = InlineKeyboardMarkup(kb) if kb else None
 
