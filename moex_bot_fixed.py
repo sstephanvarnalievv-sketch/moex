@@ -520,7 +520,7 @@ class _TinkoffRateLimiter:
     def __init__(self, max_per_minute: int = 100):
         self.min_interval = 60.0 / max_per_minute
         self._next_slot = 0.0
-        self._lock = None  # Ленивая инициализация
+        self._lock = None  # Ленивая инициализация — Lock нельзя создавать до старта event loop
 
     async def acquire(self):
         if self._lock is None:
@@ -2195,6 +2195,64 @@ COMMODITY_SECTOR_MAP: dict[str, list[str]] = {
 COMMODITY_SECTORS = set(COMMODITY_SECTOR_MAP.keys())
 
 # ══════════════════════════════════════════════
+# SECTOR NEWS MAP — нефинансовые/некоммодитиз сектора (русский язык)
+# ══════════════════════════════════════════════
+# COMMODITY_SECTOR_MAP покрывает только 6 сырьевых секторов (нефтегаз,
+# металлы, горнодобыча, золото, уголь, химия) через англоязычные commodity-
+# издания (OilPrice, Mining.com...) — эти источники физически не пишут
+# про регуляторику ЦБ, банковский надзор, санкции на IT-экспорт или
+# потребительский рынок. Для остальных секторов нужен ДРУГОЙ источник
+# (русскоязычные Interfax/TASS/Kommersant из RUSSIAN_NEWS_RSS) и ДРУГИЕ
+# ключевые слова — на русском, под конкретную специфику каждого сектора.
+SECTOR_NEWS_MAP: dict[str, list[str]] = {
+    "банки": [
+        "банковский сектор", "норматив цб", "банковский надзор",
+        "капитал банков", "резервы банков", "просроченная задолженность",
+        "ипотечное кредитование", "потребительское кредитование",
+        "санкции против банков", "swift", "корреспондентские счета",
+        "отзыв лицензии банка", "докапитализация банка",
+    ],
+    "финансы": [
+        "фондовый рынок", "мосбиржа санкции", "клиринг санкции",
+        "депозитарий санкции", "торги приостановлены", "делистинг",
+        "иностранные инвесторы россия", "заморозка активов",
+    ],
+    "IT": [
+        "санкции на экспорт технологий", "запрет поставок микрочипов",
+        "экспортный контроль полупроводники", "уход it-компаний",
+        "параллельный импорт электроники", "блокировка сервисов россия",
+        "отечественное по", "импортозамещение по",
+    ],
+    "телеком": [
+        "санкции на оборудование связи", "5g запрет", "роскомнадзор",
+        "блокировка интернет-сервисов", "отключение от сетей",
+    ],
+    "ритейл": [
+        "потребительский спрос", "инфляция продукты", "цены на товары",
+        "уход ритейлеров россия", "параллельный импорт товары",
+        "продовольственное эмбарго", "запрет на импорт товаров",
+    ],
+    "e-commerce": [
+        "санкции на платежи", "блокировка платёжных систем",
+        "трансграничная торговля запрет",
+    ],
+    "медицина": [
+        "запрет на поставки лекарств", "санкции на медоборудование",
+        "дефицит лекарств", "локализация производства лекарств",
+    ],
+    "транспорт": [
+        "санкции на авиаперевозки", "запрет полётов", "лизинг самолётов санкции",
+        "морские перевозки санкции", "порты санкции", "страхование судов запрет",
+    ],
+    "девелопмент": [
+        "льготная ипотека отмена", "ключевая ставка недвижимость",
+        "субсидированная ипотека", "спрос на жильё",
+    ],
+}
+
+SECTOR_NEWS_SECTORS = set(SECTOR_NEWS_MAP.keys())
+
+# ══════════════════════════════════════════════
 # MACRO NEWS — новости влияющие на ВЕСЬ рынок MOEX
 # ══════════════════════════════════════════════
 # В отличие от COMMODITY_SECTOR_MAP (привязан к сектору), эти новости
@@ -2649,7 +2707,94 @@ async def fetch_commodity_news(sector: str) -> list[dict]:
     return unique
 
 
-async def fetch_macro_news() -> list[dict]:
+async def fetch_sector_news(sector: str) -> list[dict]:
+    """
+    Загружает секторальные регуляторные/макро новости для нефинансовых
+    секторов (банки, IT, ритейл, телеком, медицина, транспорт,
+    девелопмент) через русскоязычные источники (RUSSIAN_NEWS_RSS) —
+    в отличие от fetch_commodity_news, которая использует англоязычные
+    commodity-издания и не годится для регуляторики ЦБ/санкций/потребрынка.
+    Возвращает до 5 свежих релевантных новостей.
+    """
+    if sector not in SECTOR_NEWS_SECTORS:
+        return []
+
+    cache_key = f"sectornews_{sector}"
+    now = time.time()
+    if cache_key in _news_cache and now - _news_cache[cache_key]["ts"] < NEWS_CACHE_TTL:
+        return _news_cache[cache_key]["items"]
+
+    keywords = SECTOR_NEWS_MAP.get(sector, [])
+    if not keywords:
+        return []
+
+    session  = _get_http_session()
+    headers  = {"User-Agent": "Mozilla/5.0 (compatible; MOEXBot/1.0)"}
+    now_dt   = datetime.now(timezone.utc)
+
+    tasks   = [_fetch_rss(session, url, headers) for url in RUSSIAN_NEWS_RSS]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    raw: list[dict] = []
+    for url, result in zip(RUSSIAN_NEWS_RSS, results):
+        if isinstance(result, Exception) or not result:
+            continue
+        for item in result:
+            title = item.get("title", "").strip()
+            if not title:
+                continue
+
+            title_lower = title.lower()
+            if any(sw in title_lower for sw in MILITARY_GEO_STOPWORDS):
+                continue
+            if any(sw in title_lower for sw in OFFTOPIC_STOPWORDS):
+                continue
+
+            full    = (title + " " + item.get("desc", "")).lower()
+            matched = [kw for kw in keywords if kw in full]
+            if not matched:
+                continue
+
+            news_age_min = 0
+            pub_str = item.get("pub", "")
+            try:
+                pub_dt = parsedate_to_datetime(pub_str)
+                if pub_dt.tzinfo is None:
+                    pub_dt = pub_dt.replace(tzinfo=timezone.utc)
+                news_age_min = (now_dt - pub_dt).total_seconds() / 60
+            except Exception:
+                pass
+
+            # Регуляторные/макро новости для секторов живут дольше обычного
+            # корпоративного факта — используем то же расширенное окно,
+            # что и commodity-геополитика, а не NEWS_MAX_AGE_MINUTES=120.
+            if news_age_min > SECTOR_MODIFIER_DEFAULT_DAYS * 24 * 60:
+                continue
+
+            source_domain = url.split("/")[2] if "/" in url else url
+            raw.append({
+                "title":    title[:200],
+                "link":     item.get("link", ""),
+                "pub":      pub_str,
+                "source":   source_domain,
+                "matched":  matched[:3],
+                "age_min":  round(news_age_min, 0),
+                "is_sector_news": True,
+            })
+
+    dedup_len = int(get_bot_settings()["news_dedup_similarity"])
+    seen, unique = set(), []
+    for it in raw:
+        norm = re.sub(r'[^\w\s]', '', it["title"].lower())[:dedup_len].strip()
+        if norm and norm not in seen:
+            seen.add(norm)
+            unique.append(it)
+
+    unique.sort(key=lambda x: x["age_min"])
+    unique = unique[:5]
+
+    _news_cache[cache_key] = {"items": unique, "ts": now}
+    return unique
     """
     Загружает макро-новости уровня 'весь рынок MOEX' — ставка ЦБ, курс рубля,
     санкции общего характера, глобальные геополитические события.
@@ -2936,10 +3081,22 @@ def check_signal_against_sector_modifier(sector: str, tech_signal: str) -> dict:
 
 async def run_geopolitical_scan():
     """
-    Фоновый цикл — раз в 30 минут проверяет свежие commodity/macro новости
-    по ВСЕМ секторам и прогоняет значимые через AI-классификатор, обновляя
-    секторальные модификаторы. Не привязан к конкретному тикеру — сканирует
-    сектора целиком, независимо от того, какие тикеры сейчас анализируются.
+    Фоновый цикл — раз в 30 минут проверяет свежие commodity/macro/секторные
+    новости по ВСЕМ секторам и прогоняет значимые через AI-классификатор,
+    обновляя секторальные модификаторы. Не привязан к конкретному тикеру —
+    сканирует сектора целиком, независимо от того, какие тикеры сейчас
+    анализируются.
+
+    Три источника новостей, каждый под свою группу секторов:
+    - fetch_commodity_news: нефтегаз, металлы, горнодобыча, золото, уголь,
+      химия — через англоязычные commodity-издания (OilPrice, Mining.com).
+    - fetch_sector_news: банки, финансы, IT, телеком, ритейл, e-commerce,
+      медицина, транспорт, девелопмент — через русскоязычные источники
+      (Interfax, TASS, Kommersant), так как эти сектора зависят от
+      регуляторики ЦБ, санкций, потребительского рынка, а не мировых
+      сырьевых цен.
+    - fetch_macro_news: общерыночные факторы (ставка ЦБ, курс рубля,
+      общие санкции) — могут задеть любой сектор, AI сам определяет какой.
     """
     while True:
         try:
@@ -2952,6 +3109,32 @@ async def run_geopolitical_scan():
 
                 for item in news[:2]:  # только самые свежие 2 на сектор за цикл
                     if item.get("age_min", 999) > 60:  # только реально свежие
+                        continue
+                    try:
+                        classification = await classify_geopolitical_impact(item["title"])
+                    except Exception as e:
+                        logger.debug(f"classify_geopolitical_impact: {e}")
+                        continue
+                    if not classification:
+                        continue
+                    for sec in classification["sectors"]:
+                        _set_sector_modifier(
+                            sec, classification["direction"],
+                            classification["strength"], classification["reason"],
+                            classification["days"]
+                        )
+
+            # Нефинансовые сектора (банки, IT, ритейл...) через русскоязычные
+            # источники — те же commodity-издания тут бесполезны.
+            for sector in SECTOR_NEWS_SECTORS:
+                try:
+                    news = await fetch_sector_news(sector)
+                except Exception as e:
+                    logger.debug(f"run_geopolitical_scan fetch_sector_news {sector}: {e}")
+                    continue
+
+                for item in news[:2]:
+                    if item.get("age_min", 999) > 60:
                         continue
                     try:
                         classification = await classify_geopolitical_impact(item["title"])
@@ -3822,7 +4005,15 @@ def calculate_sl_tp_stocks(signal: str, price: float, atr: float,
     is_long   = "LONG" in signal
     _settings = get_bot_settings()
     # Минимальный/максимальный риск — не менее 2 тиков в любом случае
-    min_tick  = tick_size if tick_size > 0 else (0.01 if price < 1 else 0.001)
+    # Правильные тики MOEX по ценовому диапазону.
+    # Было: (0.01 if price < 1 else 0.001) — неверно, давало 10%+ риск на sub-рублёвых акциях.
+    min_tick  = tick_size if tick_size > 0 else (
+        0.0001 if price < 0.01 else
+        0.001  if price < 1   else
+        0.01   if price < 50  else
+        0.1    if price < 500 else
+        1.0
+    )
     min_risk  = max(price * _settings["sl_min_risk_pct"] / 100, min_tick * 2)
     max_risk  = price * _settings["sl_max_risk_pct"] / 100
     atr_risk  = atr * 1.5
@@ -4289,14 +4480,15 @@ async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None
 
     # Попытка выгрузить вспомогательные данные в параллели с надежной обработкой ошибок
     try:
-        news_task      = fetch_russian_news(ticker, sector)
-        commodity_task = fetch_commodity_news(sector)
-        macro_task     = fetch_macro_news()
-        imoex_task     = fetch_imoex_regime()
-        htf_task       = get_htf_trend(ticker, figi, tf)
+        news_task       = fetch_russian_news(ticker, sector)
+        commodity_task  = fetch_commodity_news(sector)
+        sector_news_task = fetch_sector_news(sector)
+        macro_task      = fetch_macro_news()
+        imoex_task      = fetch_imoex_regime()
+        htf_task        = get_htf_trend(ticker, figi, tf)
 
-        news_res, commodity_res, macro_res, imoex_res, htf_res = await asyncio.gather(
-            news_task, commodity_task, macro_task, imoex_task, htf_task,
+        news_res, commodity_res, sector_news_res, macro_res, imoex_res, htf_res = await asyncio.gather(
+            news_task, commodity_task, sector_news_task, macro_task, imoex_task, htf_task,
             return_exceptions=True
         )
 
@@ -4310,6 +4502,10 @@ async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None
         if not isinstance(commodity_res, Exception) and commodity_res:
             # Добавляем commodity-новости к общему списку, помечены флагом is_commodity
             news_items = news_items + commodity_res
+        if not isinstance(sector_news_res, Exception) and sector_news_res:
+            # Секторальные регуляторные новости (банки, IT, ритейл...) —
+            # помечены флагом is_sector_news
+            news_items = news_items + sector_news_res
         if not isinstance(macro_res, Exception) and macro_res:
             # Макро-новости показываются всегда, независимо от сектора тикера
             news_items = news_items + macro_res
@@ -4766,9 +4962,10 @@ def format_analysis(result: dict) -> str:
         if sl_tp.get("warn"):
             lines.append(sl_tp["warn"])
 
-    fact_news      = [it for it in news if it.get("is_fact") and not it.get("is_corporate")]
-    commodity_news = [it for it in news if it.get("is_commodity")]
-    macro_news     = [it for it in news if it.get("is_macro")]
+    fact_news       = [it for it in news if it.get("is_fact") and not it.get("is_corporate")]
+    commodity_news  = [it for it in news if it.get("is_commodity")]
+    sector_news_list = [it for it in news if it.get("is_sector_news")]
+    macro_news      = [it for it in news if it.get("is_macro")]
 
     if fact_news:
         lines += ["", "📌 <b>RSS факты:</b>"]
@@ -4780,6 +4977,13 @@ def format_analysis(result: dict) -> str:
     if commodity_news:
         lines += ["", "🌍 <b>Мировой рынок:</b>"]
         for it in commodity_news[:3]:
+            age = int(it.get("age_min", 0))
+            age_str = f"{age}м" if age < 60 else f"{age//60}ч"
+            lines.append(f"  • {esc(it['title'][:90])}  <i>({age_str})</i>")
+
+    if sector_news_list:
+        lines += ["", "🏢 <b>Сектор (регуляторика/рынок):</b>"]
+        for it in sector_news_list[:3]:
             age = int(it.get("age_min", 0))
             age_str = f"{age}м" if age < 60 else f"{age//60}ч"
             lines.append(f"  • {esc(it['title'][:90])}  <i>({age_str})</i>")
@@ -7950,23 +8154,28 @@ async def scanner_loop(app):
                 continue
 
             if is_trading_time and SCANNER_CHAT_IDS:
-                # Запускаем параллельно акции + фьючерсы + памп/дамп + новостной триггер.
-                # Жёсткий потолок 5 минут на весь скан — цены в сигналах не должны
-                # успевать устареть на часы даже если один из под-сканов завис
-                # (сетевые тормоза RSSHub, Tinkoff rate limit и т.п.).
+                # Запускаем 4 под-скана с индивидуальными таймаутами.
+                # Раньше все 4 шли через один asyncio.wait_for(timeout=300) — при
+                # конкуренции за общий rate limiter суммарное время легко превышало
+                # 5 мин и весь пакет обрывался TimeoutError. Теперь каждый под-скан
+                # оборачивается в _safe_scan и падает независимо, не убивая остальные.
+                async def _safe_scan(name: str, coro):
+                    try:
+                        await asyncio.wait_for(coro, timeout=240.0)
+                    except asyncio.TimeoutError:
+                        logger.warning(f"scanner_loop: {name} timeout (>240s) — пропущен")
+                    except Exception as _e:
+                        logger.error(f"scanner_loop: {name} error: {type(_e).__name__}: {_e}",
+                                     exc_info=True)
+
                 try:
-                    await asyncio.wait_for(
-                        asyncio.gather(
-                            run_scanner_broadcast(app),
-                            run_futures_broadcast(app),
-                            run_pump_dump_broadcast(app, tf="15m"),
-                            run_news_driven_scan(app),
-                            return_exceptions=True,
-                        ),
-                        timeout=300.0
+                    await asyncio.gather(
+                        _safe_scan("stocks",    run_scanner_broadcast(app)),
+                        _safe_scan("futures",   run_futures_broadcast(app)),
+                        _safe_scan("pump_dump", run_pump_dump_broadcast(app, tf="15m")),
+                        _safe_scan("news",      run_news_driven_scan(app)),
                     )
-                    # Скан завершился без исключения — если до этого были сбои,
-                    # уведомляем о восстановлении.
+                    # Все под-сканы завершились (успешно или с логируемой ошибкой).
                     if _scanner_failure_state["was_failing"]:
                         await _notify_scanner_issue(
                             app,
@@ -7976,9 +8185,8 @@ async def scanner_loop(app):
                         _scanner_failure_state["was_failing"] = False
                     _scanner_failure_state["consecutive_failures"] = 0
 
-                except asyncio.TimeoutError:
-                    logger.error("scanner_loop: скан превысил 5 минут — прерван, "
-                                "чтобы не слать сигналы с устаревшими ценами")
+                except Exception as _gather_err:
+                    logger.error(f"scanner_loop: gather error: {_gather_err}", exc_info=True)
                     _scanner_failure_state["consecutive_failures"] += 1
                     now_ts = time.time()
                     since_last_notify = now_ts - _scanner_failure_state["last_failure_notify_ts"]
@@ -7987,10 +8195,8 @@ async def scanner_loop(app):
                         await _notify_scanner_issue(
                             app,
                             f"⚠️ <b>Цикл сканирования пропущен</b>\n"
-                            f"Скан превысил 5 минут (обрыв сети/RSS/API) — "
-                            f"пропущено циклов подряд: {n}.\n"
-                            f"Сигналы могут не приходить или прийти с опозданием "
-                            f"до следующего успешного цикла."
+                            f"Скан упал с ошибкой — пропущено циклов: {n}.\n"
+                            f"Сигналы могут не приходить до следующего успешного цикла."
                         )
                         _scanner_failure_state["last_failure_notify_ts"] = now_ts
                         _scanner_failure_state["was_failing"] = True
