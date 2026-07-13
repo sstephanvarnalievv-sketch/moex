@@ -4859,9 +4859,11 @@ def format_analysis(result: dict) -> str:
 
     if imoex:
         slope_arrow = "↑" if imoex.get("slope_10d", 0) > 0 else "↓"
+        imoex_price = imoex.get("price", 0)  # может отсутствовать в дефолтном dict при сбое SBER fetch
+        price_part = f"СБЕР: {imoex_price:,.2f} ₽  " if imoex_price else ""
         lines.append(
             f"<b>🏛 {esc(imoex['label'])}</b>  "
-            f"СБЕР: {imoex['price']:,.2f} ₽  {slope_arrow}{imoex.get('slope_10d',0):+.2f}%"
+            f"{price_part}{slope_arrow}{imoex.get('slope_10d',0):+.2f}%"
         )
 
     mtf = result.get("mtf_trends", {})
