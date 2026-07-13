@@ -974,10 +974,13 @@ CALENDAR_FILE          = Path("calendar_events.json")
 #   medium — второй эшелон с нормальным объёмом — торгуем осторожно
 #   low    — неликвид — предупреждаем, не блокируем (пользователь решает)
 #
-# Порог vol_ratio для каждого уровня — отдельный:
-#   high:   min_vol_ratio из mode_cfg (стандартный)
-#   medium: +0.2 к стандартному (нужно больше объёма для подтверждения)
-#   low:    предупреждение в сигнале
+# Порог vol_ratio по ликвидности — ОБРАТНО пропорционален эшелону:
+#   high  (tier 1): стандартный порог из mode_cfg
+#   medium(tier 2): −0.15 к стандартному (относительный всплеск уже значим при низком базисе)
+#   low   (tier 3): −0.3  к стандартному, минимум 0.8 (любой всплеск значим + warning в сигнале)
+#
+# Было: +0.2 и +0.5 (делало tier 2/3 СТРОЖЕ) — логически неверно, т.к. vol_ratio уже
+# нормирован к собственному среднему объёму тикера, масштаб эшелона в нём учтён.
 ADV_MIN_CANDLES = 20   # свечей для расчёта среднего объёма
 
 # Тикеры с гарантированной ликвидностью — не фильтруем
@@ -4526,12 +4529,15 @@ async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None
 
     # ── Ликвидность ───────────────────────────────────────────────────────
     liquidity_tier, liquidity_warn = get_liquidity_tier(ticker, df_closed)
-    # Для неликвида повышаем порог объёма
+    # Порог vol_ratio СНИЖАЕТСЯ для менее ликвидных тикеров:
+    # vol_ratio нормирован к собственному среднему, поэтому 1.3x у OGKB (tier 3)
+    # так же значим как 1.3x у SBER (tier 1) — а требовать 1.8x у OGKB избыточно.
     effective_mode = dict(mode_cfg)
+    base_vol = mode_cfg.get("min_vol_ratio", 1.3)
     if liquidity_tier == "medium":
-        effective_mode["min_vol_ratio"] = mode_cfg.get("min_vol_ratio", 1.3) + 0.2
+        effective_mode["min_vol_ratio"] = round(max(0.9, base_vol - 0.15), 2)
     elif liquidity_tier == "low":
-        effective_mode["min_vol_ratio"] = mode_cfg.get("min_vol_ratio", 1.3) + 0.5
+        effective_mode["min_vol_ratio"] = round(max(0.8, base_vol - 0.30), 2)
 
     pd_levels  = get_previous_day_levels(df_closed)
     pd_level_name, pd_level_dist = get_pd_level_context(pd_levels, price)
