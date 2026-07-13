@@ -7590,6 +7590,7 @@ def _get_signal_age_minutes(ticker: str, direction: str) -> float | None:
 #                         спамим каждые 30 минут, если сеть лежит долго)
 _scanner_failure_state: dict = {
     "consecutive_failures": 0,
+    "consecutive_data_failures": 0,  # сколько циклов подряд много тикеров не отвечает
     "last_failure_notify_ts": 0.0,
     "was_failing": False,  # было ли предыдущее состояние "сбой" — для алерта о восстановлении
 }
@@ -7615,25 +7616,33 @@ async def run_scanner_broadcast(app):
     long_sigs, short_sigs, _, scan_stats = await _run_scan(wl, tf, mode_cfg, exclude_low_liquidity=True)
 
     # Массовый сбой получения данных (не единичные тикеры, а половина+ ватчлиста) —
-    # это сбой Tinkoff API/сети, а не "сигналов сейчас нет". Уведомляем явно,
-    # с тем же троттлингом что и у общих сбоев скана, чтобы не спамить.
+    # это сбой Tinkoff API/сети, а не "сигналов сейчас нет".
+    # Требуем 2 последовательных цикла провала перед алертом: один кратковременный
+    # глюк API (30 сек) не должен вызывать панику — только устойчивый сбой.
     if scan_stats["failed_pct"] >= 50:
+        _scanner_failure_state["consecutive_data_failures"] += 1
         logger.warning(f"run_scanner_broadcast: {scan_stats['failed']}/{scan_stats['total']} "
-                       f"тикеров не удалось получить ({scan_stats['failed_pct']:.0f}%)")
-        now_ts = time.time()
-        since_last = now_ts - _scanner_failure_state["last_failure_notify_ts"]
-        if since_last >= SCANNER_FAILURE_NOTIFY_COOLDOWN:
-            await _notify_scanner_issue(
-                app,
-                f"⚠️ <b>Проблема с получением данных</b>\n"
-                f"Не удалось получить котировки по {scan_stats['failed']} из "
-                f"{scan_stats['total']} тикеров ({scan_stats['failed_pct']:.0f}%).\n"
-                f"Похоже на сбой Tinkoff API — сигналы могут не приходить "
-                f"до восстановления."
-            )
-            _scanner_failure_state["last_failure_notify_ts"] = now_ts
-            _scanner_failure_state["was_failing"] = True
+                       f"тикеров не удалось получить ({scan_stats['failed_pct']:.0f}%), "
+                       f"цикл провала #{_scanner_failure_state['consecutive_data_failures']}")
+        if _scanner_failure_state["consecutive_data_failures"] >= 2:
+            now_ts = time.time()
+            since_last = now_ts - _scanner_failure_state["last_failure_notify_ts"]
+            if since_last >= SCANNER_FAILURE_NOTIFY_COOLDOWN:
+                await _notify_scanner_issue(
+                    app,
+                    f"⚠️ <b>Проблема с получением данных</b>\n"
+                    f"Не удалось получить котировки по {scan_stats['failed']} из "
+                    f"{scan_stats['total']} тикеров ({scan_stats['failed_pct']:.0f}%) "
+                    f"на протяжении нескольких циклов.\n"
+                    f"Похоже на сбой Tinkoff API — сигналы могут не приходить "
+                    f"до восстановления."
+                )
+                _scanner_failure_state["last_failure_notify_ts"] = now_ts
+                _scanner_failure_state["was_failing"] = True
         return
+
+    # Скан прошёл нормально — сбрасываем счётчик кратковременных провалов данных
+    _scanner_failure_state["consecutive_data_failures"] = 0
 
     all_sigs = long_sigs + short_sigs
     if not all_sigs:
@@ -7861,6 +7870,13 @@ async def run_news_driven_scan(app):
         price     = pa["price"]
         move_pct  = pa["move_pct"]
         reason    = pa["reason"]
+
+        # price=0 означает что Tinkoff API не вернул свечей по этому тикеру
+        # (делистинг, приостановка торгов, недоступный инструмент).
+        # Показывать "Цена: 0.00 ₽ ⏳ ЖДАТЬ — нет данных свечей" бессмысленно.
+        if price == 0:
+            logger.debug(f"news_trigger: {ticker} — нет данных свечей, пропускаем")
+            continue
 
         action_emoji = {
             "long":   "🟢 ЛОНГ",
