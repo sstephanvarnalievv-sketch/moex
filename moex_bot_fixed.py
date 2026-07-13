@@ -4218,10 +4218,13 @@ def compute_tech_score(df: pd.DataFrame, mode_cfg: dict,
             short_gates += 1
             short_r.append("EMA20 < EMA50 (нисходящий тренд)")
 
-    # ── ГЕЙТ 2: Объём ──
+    # ── ГЕЙТ 2: Объём (нижний + верхний порог) ──
     min_vol = mode_cfg.get("min_vol_ratio", 1.3)
     if vol_r < min_vol:
         return "НЕТ СИГНАЛА", 0, [f"Низкий объём (x{vol_r:.1f} < x{min_vol:.1f} — нет подтверждения)"]
+    max_vol = mode_cfg.get("max_vol_ratio")
+    if max_vol and vol_r > max_vol:
+        return "НЕТ СИГНАЛА", 0, [f"Аномальный объём (x{vol_r:.1f} > x{max_vol:.1f}) — возможный памп/сквиз, пропускаем"]
 
     # ── ГЕЙТ 3: RSI — предупреждение, не жёсткий блок ──
     # На MOEX импульсные пробои часто начинаются из перекупленности (RSI 72-80).
@@ -4535,9 +4538,15 @@ async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None
     effective_mode = dict(mode_cfg)
     base_vol = mode_cfg.get("min_vol_ratio", 1.3)
     if liquidity_tier == "medium":
+        # Снижаем нижний порог (vol_ratio уже нормирован к собственному среднему)
         effective_mode["min_vol_ratio"] = round(max(0.9, base_vol - 0.15), 2)
+        # Верхний порог: >4x в среднеликвидном тикере — вероятный памп/сквиз
+        effective_mode["max_vol_ratio"] = 4.0
     elif liquidity_tier == "low":
+        # Снижаем нижний порог ещё сильнее
         effective_mode["min_vol_ratio"] = round(max(0.8, base_vol - 0.30), 2)
+        # Верхний порог: >3x в низколиквидном тикере — высокий риск сквиза/манипуляции
+        effective_mode["max_vol_ratio"] = 3.0
 
     pd_levels  = get_previous_day_levels(df_closed)
     pd_level_name, pd_level_dist = get_pd_level_context(pd_levels, price)
