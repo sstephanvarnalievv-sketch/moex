@@ -1570,6 +1570,8 @@ async def fetch_last_price_tinkoff(figi: str) -> float | None:
             headers=_tinkoff_headers(), json={"figi": [figi]},
         ) as r:
             if r.status != 200:
+                error_text = await r.text()
+                logger.warning(f"Tinkoff last price {figi}: HTTP {r.status} - {error_text[:200]}")
                 return None
             data = await r.json()
             prices = data.get("lastPrices", [])
