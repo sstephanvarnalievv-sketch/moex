@@ -1631,7 +1631,7 @@ async def fetch_candles_tinkoff(figi: str, interval: str, limit: int) -> pd.Data
         "interval": interval,
     }
 
-    try:
+        try:
         data = None
         session = _get_http_session()
         for attempt in range(3):
@@ -1646,7 +1646,8 @@ async def fetch_candles_tinkoff(figi: str, interval: str, limit: int) -> pd.Data
                     await asyncio.sleep(wait)
                     continue
                 if r.status != 200:
-                    logger.warning(f"Tinkoff candles {figi}: HTTP {r.status}")
+                    error_text = await r.text()
+                    logger.warning(f"Tinkoff candles {figi}: HTTP {r.status} - {error_text[:200]}")
                     return None
                 data = await r.json()
                 break
