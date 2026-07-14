@@ -7878,7 +7878,7 @@ async def run_news_driven_scan(app):
         # (делистинг, приостановка торгов, недоступный инструмент).
         # Показывать "Цена: 0.00 ₽ ⏳ ЖДАТЬ — нет данных свечей" бессмысленно.
         if price == 0:
-            logger.debug(f"news_trigger: {ticker} — нет данных свечей, пропускаем")
+            logger.warning(f"news_trigger: {ticker} (figi: {figi}) — Tinkoff API не вернул свечи (price=0). Пропускаем.")
             continue
 
         action_emoji = {
