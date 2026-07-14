@@ -1631,7 +1631,7 @@ async def fetch_candles_tinkoff(figi: str, interval: str, limit: int) -> pd.Data
         "interval": interval,
     }
 
-        try:
+    try:
         data = None
         session = _get_http_session()
         for attempt in range(3):
