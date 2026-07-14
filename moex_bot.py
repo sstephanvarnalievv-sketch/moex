@@ -8195,11 +8195,14 @@ async def scanner_loop(app):
                 # конкуренции за общий rate limiter суммарное время легко превышало
                 # 5 мин и весь пакет обрывался TimeoutError. Теперь каждый под-скан
                 # оборачивается в _safe_scan и падает независимо, не убивая остальные.
+                                # Запускаем 4 под-скана. Раньше тут стоял timeout=240.0,
+                # но из-за AI (Gemini/Groq) скан 30 тикеров мог идти 5+ минут,
+                # таймаут срабатывал, и сигналы молча убивались.
                 async def _safe_scan(name: str, coro):
                     try:
-                        await asyncio.wait_for(coro, timeout=240.0)
+                        await coro  # Убрали wait_for, скан идёт столько, сколько нужно
                     except asyncio.TimeoutError:
-                        logger.warning(f"scanner_loop: {name} timeout (>240s) — пропущен")
+                        logger.warning(f"scanner_loop: {name} timeout — пропущен")
                     except Exception as _e:
                         logger.error(f"scanner_loop: {name} error: {type(_e).__name__}: {_e}",
                                      exc_info=True)
