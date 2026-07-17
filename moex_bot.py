@@ -521,7 +521,7 @@ class _AIRateLimiter:
             time.sleep(wait)
 
 
-_ai_rate_limiter = _AIRateLimiter(max_per_minute=3)
+_ai_rate_limiter = _AIRateLimiter(max_per_minute=10)
 
 
 def _cleanup_pending_trades():
