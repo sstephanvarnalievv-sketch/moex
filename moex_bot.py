@@ -1740,10 +1740,10 @@ async def fetch_imoex_regime() -> dict:
     if cache_key in _cache and now - _cache[cache_key]["ts"] < 1200:
         return _cache[cache_key]["val"]
     try:
-        figi = MOEX_STOCKS["SBER"][0]
+        figi = MOEX_STOCKS["MOEX"][0]
         df = await fetch_candles_tinkoff(figi, "CANDLE_INTERVAL_DAY", 120)
         if df is None or len(df) < 50:
-            raise ValueError("Недостаточно данных для IMOEX-прокси (SBER)")
+            raise ValueError("Недостаточно данных для IMOEX-прокси (MOEX)")
 
         close = df["close"].values
         price = close[-1]
@@ -3324,8 +3324,24 @@ async def ai_evaluate_news(news_items: list[dict], ticker: str, sector: str,
     2. RSS keyword-факты (если e-disclosure пустой)
     3. Если нет ни того ни другого - "чисто техническое движение"
     """
+    has_signal = "LONG" in tech_signal or "SHORT" in tech_signal or "ВЫХОД" in tech_signal
+    min_score_required = get_bot_settings()["min_tech_score_confirmed"]
+    fallback_status = "NO_SIGNAL" if not has_signal else (
+        "WEAK" if tech_score < min_score_required else "CONFIRMED"
+    )
+
     if not get_ai_enabled():
-        return {"summary": "", "ai_label": "", "ai_weight": 0}
+        return {
+            "summary": "",
+            "ai_label": "",
+            "ai_weight": 0,
+            "filter_status": fallback_status,
+            "confirmed": tech_signal,
+            "event_type": "",
+            "event_weight": 0,
+            "movement_explained": False,
+            "ai_skip_reason": "ai_disabled",
+        }
     is_long  = "LONG" in tech_signal
     is_short = "SHORT" in tech_signal or "ВЫХОД" in tech_signal
     has_signal = is_long or is_short
@@ -4515,9 +4531,29 @@ async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None
 
     edisclosure_items: list = []
 
-    # AI оценка новостей — отложена: запускается после отправки сигнала
-    news_ai = {"confirmed": tech_signal, "ai_skip_reason": "deferred", 
-               "filter_status": "", "event_type": "", "event_weight": 0, "summary": ""}
+    # AI оценка новостей — выполняется в реальном времени, но с fallback на техсигнал
+    try:
+        news_ai = await ai_evaluate_news(
+            news_items,
+            ticker,
+            sector,
+            tech_signal,
+            tech_score,
+            price_anomaly=price_anomaly,
+            edisclosure_items=edisclosure_items,
+            htf_trend=htf_trend,
+        )
+    except Exception as ai_err:
+        logger.debug(f"AI evaluation failed for {ticker}: {ai_err}")
+        news_ai = {
+            "confirmed": tech_signal,
+            "ai_skip_reason": "ai_error",
+            "filter_status": "CONFIRMED" if "LONG" in tech_signal or "SHORT" in tech_signal else "NO_SIGNAL",
+            "event_type": "",
+            "event_weight": 0,
+            "summary": "",
+            "movement_explained": False,
+        }
     final_signal = tech_signal
 
     if imoex_regime and imoex_regime.get("regime") == "bear" and "LONG" in final_signal:
