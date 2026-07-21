@@ -31,6 +31,21 @@ def test_ai_evaluate_news_falls_back_when_ai_disabled(monkeypatch):
     assert result["ai_skip_reason"] == "ai_disabled"
 
 
+def test_fetch_price_for_trade_falls_back_to_moex_candles(monkeypatch):
+    async def fake_fetch_last_price_tinkoff(figi):
+        return None
+
+    async def fake_fetch_candles_tinkoff(figi, interval, limit, ticker=None):
+        return pd.DataFrame([{"close": 164.0}])
+
+    monkeypatch.setattr(moex_bot, "fetch_last_price_tinkoff", fake_fetch_last_price_tinkoff)
+    monkeypatch.setattr(moex_bot, "fetch_candles_tinkoff", fake_fetch_candles_tinkoff)
+
+    price = asyncio.run(moex_bot.fetch_price_for_trade("MOEX", "BBGTEST", fallback_price=100.0))
+
+    assert price == 164.0
+
+
 def test_fetch_candles_tinkoff_returns_dataframe_on_success(monkeypatch):
     class FakeResponse:
         status = 200

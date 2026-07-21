@@ -1500,6 +1500,35 @@ async def fetch_last_price_tinkoff(figi: str) -> float | None:
         logger.warning(f"Tinkoff last price {figi}: {e}")
     return None
 
+async def fetch_price_for_trade(ticker: str, figi: str | None = None, fallback_price: float | None = None) -> float | None:
+    """Возвращает цену для входа в сделку: сначала реальная последняя цена Tinkoff, затем свечи/МОEX fallback."""
+    ticker = (ticker or "").upper().strip()
+    figi = (figi or "").strip()
+    if not figi and ticker:
+        figi = MOEX_STOCKS.get(ticker, ("",))[0]
+
+    if figi:
+        try:
+            price = await fetch_last_price_tinkoff(figi)
+            if price and price > 0:
+                return float(price)
+        except Exception:
+            pass
+
+    if ticker:
+        try:
+            candles = await fetch_candles_tinkoff(figi, "CANDLE_INTERVAL_5_MIN", 2, ticker=ticker)
+            if candles is not None and len(candles) >= 1:
+                last_close = float(candles["close"].iloc[-1])
+                if last_close > 0:
+                    return last_close
+        except Exception:
+            pass
+
+    if fallback_price and fallback_price > 0:
+        return float(fallback_price)
+    return None
+
 async def _get_usd_rub() -> float:
     """Получаем курс USD/RUB через Tinkoff - USDRUBF фьючерс или CNYRUB_TOM."""
     global _usd_rub_rate, _usd_rub_ts
@@ -1741,7 +1770,7 @@ async def fetch_imoex_regime() -> dict:
         return _cache[cache_key]["val"]
     try:
         figi = MOEX_STOCKS["MOEX"][0]
-        df = await fetch_candles_tinkoff(figi, "CANDLE_INTERVAL_DAY", 120)
+        df = await fetch_candles_tinkoff(figi, "CANDLE_INTERVAL_DAY", 120, ticker="MOEX")
         if df is None or len(df) < 50:
             raise ValueError("Недостаточно данных для IMOEX-прокси (MOEX)")
 
@@ -3104,6 +3133,8 @@ async def run_geopolitical_scan():
 # Sokrashchaet kolichestvo AI-vyzovov, keshiruya otvety po hashu prompta.
 _AI_CACHE: dict[int, tuple[str, float]] = {}  # hash -> (response, timestamp)
 _AI_CACHE_TTL = 1800  # 30 minut
+_ai_provider_cooldown_until = 0.0
+
 
 def _ai_cache_get(prompt: str) -> str | None:
     """Vozvrashaet keshirovannyy otvet ili None."""
@@ -3125,9 +3156,21 @@ def _ai_cache_set(prompt: str, response: str):
             del _AI_CACHE[k]
 
 
+def _mark_ai_provider_cooldown(seconds: int = 90) -> None:
+    global _ai_provider_cooldown_until
+    _ai_provider_cooldown_until = time.time() + seconds
+
+
+def _ai_provider_available() -> bool:
+    return time.time() >= _ai_provider_cooldown_until
+
+
 def _groq_call(prompt: str, model_idx: int = 0) -> str:
     """Groq fallback - ispolzuetsya esli Gemini nedostupen ili vernul pustoy otvet."""
     if not get_ai_enabled():
+        return ""
+    if not _ai_provider_available():
+        logger.debug("AI providers in cooldown, skipping Groq call")
         return ""
     if not groq_client:
         return _openrouter_call(prompt)
@@ -3161,6 +3204,7 @@ def _groq_call(prompt: str, model_idx: int = 0) -> str:
                 elif "quota" in err.lower() or "exhausted" in err.lower() or "limit reached" in err.lower():
                     logger.warning(f"Groq daily quota exhausted, backing off 1h")
                     _groq_call._daily_quota_exhausted = time.time()
+                    _mark_ai_provider_cooldown(90)
                     break
                 else:
                     logger.warning(f"Groq {GROQ_MODELS[i]}: {e}")
@@ -3173,6 +3217,9 @@ def _gemini_call(prompt: str) -> str:
     """Gemini primary (google-genai SDK) -> Groq fallback pri oshibke ili pustom otvete."""
     if not get_ai_enabled():
         logger.debug("AI disabled, skipping _gemini_call")
+        return ""
+    if not _ai_provider_available():
+        logger.debug("AI providers in cooldown, skipping Gemini call")
         return ""
     # Proverka kesha
     cached = _ai_cache_get(prompt)
@@ -3213,6 +3260,7 @@ def _gemini_call(prompt: str) -> str:
                 elif "exhausted" in err.lower() or "resource_exhausted" in err.lower():
                     logger.warning(f"Gemini quota exhausted, switching to Groq")
                     _gemini_call._daily_quota_exhausted = time.time()
+                    _mark_ai_provider_cooldown(90)
                     break
                 else:
                     logger.warning(f"Gemini try {attempt+1} failed: {e}")
@@ -3224,6 +3272,9 @@ def _gemini_call(prompt: str) -> str:
 def _openrouter_call(prompt: str) -> str:
     """OpenRouter fallback - ispolzuetsya esli Gemini i Groq nedostupny."""
     if not get_ai_enabled():
+        return ""
+    if not _ai_provider_available():
+        logger.debug("AI providers in cooldown, skipping OpenRouter call")
         return ""
     if not openrouter_client:
         return ""
@@ -3263,6 +3314,7 @@ def _openrouter_call(prompt: str) -> str:
                 elif "quota" in resp.text.lower() or "exhausted" in resp.text.lower():
                     logger.warning(f"OpenRouter quota exhausted, backing off")
                     _openrouter_call._daily_quota_exhausted = time.time()
+                    _mark_ai_provider_cooldown(90)
                     break
                 else:
                     logger.warning(f"OpenRouter {model}: HTTP {resp.status_code}")
@@ -4814,7 +4866,7 @@ def format_analysis(result: dict) -> str:
     if imoex:
         slope_arrow = "↑" if imoex.get("slope_10d", 0) > 0 else "↓"
         imoex_price = imoex.get("price", 0)  
-        price_part = f"СБЕР: {imoex_price:,.2f} ₽  " if imoex_price else ""
+        price_part = f"MOEX: {imoex_price:,.2f} ₽  " if imoex_price else ""
         lines.append(
             f"<b>🏛 {esc(imoex['label'])}</b>  "
             f"{price_part}{slope_arrow}{imoex.get('slope_10d',0):+.2f}%"
@@ -7248,7 +7300,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         figi_check = MOEX_STOCKS.get(ticker.upper(), ("",))[0] or FUTURES.get(ticker.upper(), ("",))[0]
-        real_price = await fetch_last_price_tinkoff(figi_check) if figi_check else None
+        real_price = await fetch_price_for_trade(ticker, figi_check, entry) if figi_check or ticker else entry
 
         price_drift_pct = 0.0
         price_warning   = ""
@@ -7260,7 +7312,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                        (direction == "SHORT" and real_price < entry))
 
             if drift_abs >= 1.0:
-                
+                entry = real_price
+                if sl and entry:
+                    scale = entry / float(entry) if False else 1.0
                 await query.answer(
                     f"⚠️ Цена ушла на {price_drift_pct:+.2f}% от сигнала!",
                     show_alert=True
