@@ -1469,6 +1469,13 @@ def _tinkoff_headers() -> dict:
         "Content-Type": "application/json",
     }
 
+
+def _is_valid_figi(figi: str | None) -> bool:
+    if not figi:
+        return False
+    figi = str(figi).strip()
+    return bool(figi) and bool(re.fullmatch(r"[A-Za-z0-9._-]{3,}", figi))
+
 _usd_rub_rate: float = 0.0
 _usd_rub_ts:   float = 0.0
 
@@ -1511,11 +1518,17 @@ async def _get_usd_rub() -> float:
         pass
     return _usd_rub_rate if _usd_rub_rate > 0 else 75.0  
 
-async def fetch_candles_tinkoff(figi: str, interval: str, limit: int) -> pd.DataFrame | None:
+async def fetch_candles_tinkoff(figi: str, interval: str, limit: int, ticker: str | None = None) -> pd.DataFrame | None:
     cache_key = f"candles_{figi}_{interval}"
     now = time.time()
     if cache_key in _cache and now - _cache[cache_key]["ts"] < 120:
         return _cache[cache_key]["df"]
+
+    if not _is_valid_figi(figi):
+        logger.warning(f"Tinkoff candles skipped: invalid FIGI {figi!r}")
+        if ticker:
+            return await fetch_candles_moex(ticker, interval, limit)
+        return None
 
     interval_minutes = {
         "CANDLE_INTERVAL_1_MIN": 1, "CANDLE_INTERVAL_5_MIN": 5,
@@ -1557,18 +1570,26 @@ async def fetch_candles_tinkoff(figi: str, interval: str, limit: int) -> pd.Data
                 if r.status != 200:
                     error_text = await r.text()
                     logger.warning(f"Tinkoff candles {figi}: HTTP {r.status} - {error_text[:200]}")
+                    if ticker:
+                        return await fetch_candles_moex(ticker, interval, limit)
                     return None
                 data = await r.json()
                 break
         if data is None:
+            if ticker:
+                return await fetch_candles_moex(ticker, interval, limit)
             return None
     except Exception as e:
         logger.error(f"Tinkoff candles {figi}: {e}")
+        if ticker:
+            return await fetch_candles_moex(ticker, interval, limit)
         return None
 
     candles = data.get("candles", [])
     if not candles:
         logger.warning(f"Tinkoff candles {figi} [{interval}]: пустой ответ - нет свечей в данных")
+        if ticker:
+            return await fetch_candles_moex(ticker, interval, limit)
         return None
 
     rows = []
@@ -1602,6 +1623,7 @@ async def fetch_candles_tinkoff(figi: str, interval: str, limit: int) -> pd.Data
             logger.debug(f"Converted {figi} prices USD→RUB at rate {rate:.2f}")
 
     _cache[cache_key] = {"df": df, "ts": now}
+    return df
 
 # === MOEX ISS fallback for candles ===
 _MOEX_INTERVAL_MAP = {
