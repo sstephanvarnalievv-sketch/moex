@@ -1520,16 +1520,15 @@ async def fetch_candles_tinkoff(figi: str, interval: str, limit: int) -> pd.Data
     if cache_key in _cache and now - _cache[cache_key]["ts"] < 120:
         return _cache[cache_key]["df"]
 
-    # ИСПРАВЛЕНИЕ: Жёсткие лимиты Tinkoff API на диапазон дат.
-    # Для 1m, 5m, 15m нельзя просить больше 1-2 дней, иначе API отдает 0 свечей!
+    # ИСПРАВЛЕНИЕ: Увеличиваем период для 4h и 1h свечей, чтобы набралось >30 свечей для расчета тренда
     max_days_by_interval = {
         "CANDLE_INTERVAL_1_MIN":   1,
         "CANDLE_INTERVAL_5_MIN":   1,
-        "CANDLE_INTERVAL_15_MIN":  2,  # 2 дня идеально покрывают 15м свечи
-        "CANDLE_INTERVAL_HOUR":    7,
-        "CANDLE_INTERVAL_4_HOUR":  7,
-        "CANDLE_INTERVAL_DAY":     30,
-        "CANDLE_INTERVAL_WEEK":   100,
+        "CANDLE_INTERVAL_15_MIN":  2,   # 2 дня = ~50 свечей
+        "CANDLE_INTERVAL_HOUR":    14,  # 14 дней = ~100 свечей
+        "CANDLE_INTERVAL_4_HOUR":  30,  # 30 дней = ~70 свечей (достаточно для EMA20/EMA50)
+        "CANDLE_INTERVAL_DAY":     90,
+        "CANDLE_INTERVAL_WEEK":   180,
     }
     delta_days = max_days_by_interval.get(interval, 2)
 
