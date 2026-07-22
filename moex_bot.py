@@ -7361,34 +7361,74 @@ async def _notify_scanner_issue(app, message: str):
             logger.warning(f"_notify_scanner_issue: не удалось отправить в {chat_id}: {e}")
 
 async def _background_ai_evaluation(app, ticker: str, sector: str, 
-                              news_items: list, tech_signal: str, 
-                              tech_score: int, price: float) -> None:
-    """Фоновая AI дооценка сигнала. Вызывается после отправки тех-сигнала в чат."""
+                                     news_items: list, tech_signal: str, 
+                                     tech_score: int, price: float,
+                                     sl_tp: dict, tf: str) -> None:
+    """
+    ЭТАП 2: Фоновая AI оценка сигнала.
+    Запускается СРАЗУ ПОСЛЕ того, как технический сигнал ушел в чат.
+    """
     try:
-        if not news_items:
-            return
+        # Прогоняем через ИИ
         news_ai = await ai_evaluate_news(
-            list(news_items), ticker, sector, tech_signal, tech_score
+            news_items or [], ticker, sector, tech_signal, tech_score
         )
-        ai_skip = news_ai.get("ai_skip_reason", "")
-        if ai_skip and ai_skip != "deferred":
-            return
-        filter_status = news_ai.get("filter_status", "")
-        summary = news_ai.get("summary", "")
-        if not filter_status and not summary:
-            return
-        fs_label = {"CONFIRMED": "✅ CONFIRMED", "WEAK": "⚠️ WEAK", "NEWS_ONLY": "📰 NEWS"}.get(filter_status, filter_status)
-        msg = f"🤖 <b>AI дооценка [{ticker}]</b>\nСтатус: {fs_label}\n"
+        
+        filter_status = news_ai.get("filter_status", "CONFIRMED")
+        event_type    = news_ai.get("event_type", "")
+        summary       = news_ai.get("summary", "")
+
+        # 1. Регистрируем в базе отслеживания исходов для AI Memory
+        has_direction = "LONG" in tech_signal or "SHORT" in tech_signal
+        if has_direction and sl_tp:
+            signal_id = f"{ticker}_{tf}_{int(time.time())}"
+            _pending_outcomes_add(signal_id, {
+                "ticker":        ticker,
+                "tf":            tf,
+                "direction":     "LONG" if "LONG" in tech_signal else "SHORT",
+                "signal_ts":     datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "entry_price":   price,
+                "sl":            sl_tp.get("sl", 0),
+                "tp1":           sl_tp.get("tp1", 0),
+                "tp2":           sl_tp.get("tp2", 0),
+                "tp3":           sl_tp.get("tp3", 0),
+                "tech_score":    tech_score,
+                "filter_status": filter_status,
+                "event_type":    event_type,
+                "figi":          MOEX_STOCKS.get(ticker, ("",))[0],
+                "mfe_pct":       0.0,
+                "mae_pct":       0.0,
+            })
+
+        # 2. Формируем доп. сообщение со статусом от ИИ в чаты
+        fs_emoji = {"CONFIRMED": "✅", "WEAK": "🟡", "BLOCKED": "🚫", "NEWS_ONLY": "📢"}.get(filter_status, "⚪")
+        fs_label = {
+            "CONFIRMED": "CONFIRMED (подтверждён)",
+            "WEAK":      "WEAK (повышенный риск)",
+            "BLOCKED":   "BLOCKED (заблокирован новостями)"
+        }.get(filter_status, filter_status)
+
+        lines = [
+            f"🤖 <b>AI статус сигнала — {esc(ticker)}</b>",
+            f"Статус: {fs_emoji} <b>{fs_label}</b>",
+        ]
         if summary:
-            msg += f"📌 <i>{summary[:200]}</i>\n"
-        msg += f"💰 Цена: {price:.2f} ₽ | TechScore: {tech_score}"
+            lines.append(f"📌 <i>{esc(summary)}</i>")
+        elif news_items:
+            lines.append("📌 <i>Факты компании учтены, противопоказаний нет.</i>")
+        else:
+            lines.append("📌 <i>Новостных рисков нет — чисто технический импульс.</i>")
+
+        msg_text = "\n".join(lines)
+
         for chat_id in SCANNER_CHAT_IDS:
             try:
-                await app.bot.send_message(chat_id, msg, parse_mode="HTML")
-            except Exception:
-                pass
+                await app.bot.send_message(chat_id, msg_text, parse_mode="HTML")
+            except Exception as e:
+                logger.warning(f"AI background msg failed for {chat_id}: {e}")
+
     except Exception as e:
-        logger.debug(f"_background_ai_evaluation {ticker}: {e}")
+        logger.error(f"_background_ai_evaluation error for {ticker}: {e}", exc_info=True)
 
 
 async def run_scanner_broadcast(app):
