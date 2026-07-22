@@ -4518,7 +4518,7 @@ async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None
         "1h":  t_1h  if not isinstance(t_1h,  Exception) else "неизвестно",
         "4h":  t_4h  if not isinstance(t_4h,  Exception) else "неизвестно",
     }
-    daily_poc = calculate_daily_poc(df_daily_res) if not isinstance(df_daily_res, Exception) else None
+    daily_poc = calculate_daily_poc(df_daily_res) if (df_daily_res is not None and not isinstance(df_daily_res, Exception)) else None
 
     try:
         news_task       = fetch_russian_news(ticker, sector)
@@ -4571,7 +4571,6 @@ async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None
     price_anomaly = detect_price_anomaly(df_closed, tf)
     edisclosure_items: list = []
 
-    # ТВОЯ ЛОГИКА: Если ручной /analyze -> запрашиваем ИИ сразу. Если скан -> откладываем на фоновую задачу!
     if run_ai:
         try:
             news_ai = await ai_evaluate_news(
@@ -4597,11 +4596,37 @@ async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None
     sector_check = check_signal_against_sector_modifier(sector, final_signal)
     sl_tp = calculate_sl_tp_stocks(tech_signal, price, atr, supports, resistances, pd_levels=pd_levels)
 
-    # 🟢 ФИКС ДНЕВНОГО ATR (Считается всегда от 30-дневных свечей)
+    # 🟢 ВОССТАНОВЛЕН РАСЧЕТ ПРОГРЕССА СВЕЧИ
+    candle_progress_pct  = 0.0
+    candle_progress_note = ""
+    try:
+        last_open  = float(df["open"].iloc[-1])
+        last_high  = float(df["high"].iloc[-1])
+        last_low   = float(df["low"].iloc[-1])
+        candle_range = last_high - last_low
+        if candle_range > 0:
+            if "LONG" in tech_signal:
+                candle_progress_pct = (price - last_low)  / candle_range * 100
+            elif "SHORT" in tech_signal or "ВЫХОД" in tech_signal:
+                candle_progress_pct = (last_high - price) / candle_range * 100
+            else:
+                candle_progress_pct = (price - last_low)  / candle_range * 100
+            candle_progress_pct = max(0.0, min(100.0, candle_progress_pct))
+
+        if candle_progress_pct >= 80:
+            candle_progress_note = f"⏳ <b>Поздний вход:</b> свеча пройдена на {candle_progress_pct:.0f}%."
+        elif candle_progress_pct >= 55:
+            candle_progress_note = f"⚠️ Свеча пройдена на {candle_progress_pct:.0f}% - вход с осторожностью."
+        else:
+            candle_progress_note = f"✅ Свеча пройдена на {candle_progress_pct:.0f}% - вход актуален."
+    except Exception:
+        pass
+
+    # 🟢 ДНЕВНОЙ ATR (От 30-дневного df_daily_res)
     daily_atr_progress_pct  = 0.0
     daily_atr_progress_note = ""
     try:
-        if df_daily_res is not None and len(df_daily_res) >= 5:
+        if df_daily_res is not None and not isinstance(df_daily_res, Exception) and len(df_daily_res) >= 5:
             daily_ranges = (df_daily_res["high"] - df_daily_res["low"]).tail(14)
             avg_daily_atr = float(daily_ranges.mean())
             today_high = float(df_daily_res["high"].iloc[-1])
@@ -4611,11 +4636,11 @@ async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None
                 daily_atr_progress_pct = today_range / avg_daily_atr * 100
                 pct = round(daily_atr_progress_pct)
                 if daily_atr_progress_pct >= 90:
-                    daily_atr_progress_note = f"🔴 <b>Дневной ATR исчерпан на {pct}%</b> - день выдохся. Входы рискованны."
+                    daily_atr_progress_note = f"🔴 <b>Дневной ATR исчерпан на {pct}%</b> - день выдохся."
                 elif daily_atr_progress_pct >= 70:
-                    daily_atr_progress_note = f"🟡 Дневной ATR пройден на {pct}% - потенциал движения ограничен."
+                    daily_atr_progress_note = f"🟡 Дневной ATR пройден на {pct}% - потенциал ограничен."
                 else:
-                    daily_atr_progress_note = f"🟢 Дневной ATR пройден на {pct}% - пространство для движения есть."
+                    daily_atr_progress_note = f"🟢 Дневной ATR пройден на {pct}% - пространство есть."
     except Exception as atr_err:
         logger.debug(f"Daily ATR error {ticker}: {atr_err}")
 
@@ -4635,6 +4660,7 @@ async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None
         "price_anomaly": price_anomaly, "edisclosure_items": edisclosure_items[:3],
         "mtf_trends": mtf_trends, "daily_poc": daily_poc,
 }
+
 
 def format_analysis(result: dict) -> str:
     if "error" in result:
