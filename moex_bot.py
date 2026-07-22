@@ -6736,17 +6736,14 @@ async def _analyze_with_semaphore(ticker: str, tf: str, mode_cfg: dict) -> dict 
     async with _get_semaphore():
         for attempt in range(3):
             try:
-                result = await analyze_stock(ticker, tf, mode_cfg)
+                # ИСПРАВЛЕНИЕ: run_ai=False делает скан супер-быстрым чисто по технике
+                result = await analyze_stock(ticker, tf, mode_cfg, run_ai=False)
                 return result
             except Exception as e:
                 err_str = str(e)
                 if "429" in err_str or "Too Many Requests" in err_str:
-                    jitter = __import__("random").uniform(0, 1)
-                    wait = 2 ** attempt + jitter
-                    logger.warning(f"Rate limit {ticker}, retry {attempt+1} in {wait:.1f}s")
-                    await asyncio.sleep(wait)
+                    await asyncio.sleep(2 ** attempt)
                 else:
-                    logger.debug(f"analyze {ticker}: {e}")
                     return None
         return None
 async def _run_scan(tickers: list[str], tf: str, mode_cfg: dict,
