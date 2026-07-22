@@ -4463,7 +4463,7 @@ def calculate_daily_poc(df_daily) -> float | None:
     except Exception:
         return None
 
-async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None) -> dict | None:
+async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None, run_ai: bool = True) -> dict | None:
     if mode_cfg is None:
         mode_cfg = TRADE_MODES["mid"]
     ticker = ticker.upper()
@@ -4483,26 +4483,19 @@ async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None
         return {"error": f"Ошибка загрузки котировок {ticker}: {e}"}
 
     if df_result is None or len(df_result) < 20:
-        
         try:
             interval, _, limit = TF_MAP.get(tf, TF_MAP[DEFAULT_TF])
             figi_fb = MOEX_STOCKS[ticker][0]
             df_fb = await fetch_candles_tinkoff(figi_fb, interval, limit * 2)
             if df_fb is not None and len(df_fb) >= 20:
                 df_result = df_fb
-                logger.info(f"analyze_stock {ticker}: использован расширенный период (x2)")
             else:
-                logger.warning(f"analyze_stock {ticker}: данных нет даже с x2 периодом. "
-                               f"Свечей: {len(df_fb) if df_fb is not None else 0}")
-                # Пробуем MOEX ISS как fallback
                 try:
                     df_moex = await fetch_candles_moex(ticker, interval, limit)
                     if df_moex is not None and len(df_moex) >= 20:
                         df_result = df_moex
-                        logger.info(f"analyze_stock {ticker}: использован MOEX ISS fallback ({len(df_moex)} свечей)")
                     else:
-                        return {"error": f"Недостаточно данных ({ticker}, TF={tf}). "
-                                         f"Попробуй /update_figi или подожди открытия сессии."}
+                        return {"error": f"Недостаточно данных ({ticker}, TF={tf})."}
                 except Exception as moex_err:
                     return {"error": f"Недостаточно данных ({ticker}, TF={tf}): {moex_err}"}
         except Exception as fb_err:
@@ -4541,26 +4534,21 @@ async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None
         )
 
         if not isinstance(news_res, Exception) and news_res is not None:
-            
             _settings = get_bot_settings()
-            max_age = (_settings["news_max_age_liquid_min"] if ticker in LIQUID_TICKERS
-                       else _settings["news_max_age_min"])
+            max_age = (_settings["news_max_age_liquid_min"] if ticker in LIQUID_TICKERS else _settings["news_max_age_min"])
             news_items = [it for it in news_res if it.get("age_min", 0) <= max_age]
         if not isinstance(commodity_res, Exception) and commodity_res:
-            
             news_items = news_items + commodity_res
         if not isinstance(sector_news_res, Exception) and sector_news_res:
-            
             news_items = news_items + sector_news_res
         if not isinstance(macro_res, Exception) and macro_res:
-            
             news_items = news_items + macro_res
         if not isinstance(imoex_res, Exception) and imoex_res is not None:
             imoex_regime = imoex_res
         if not isinstance(htf_res, Exception) and htf_res is not None:
             htf_trend = htf_res
     except Exception as aux_err:
-        logger.warning(f"Ошибка сбора вспомогательных данных для {ticker}: {aux_err}")
+        logger.warning(f"Ошибка сбора данных для {ticker}: {aux_err}")
 
     df = calculate_indicators(df_result, tf)
     df_closed = df.iloc[:-1].copy()
@@ -4568,22 +4556,9 @@ async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None
     atr   = float(df_closed["atr"].dropna().iloc[-1]) if "atr" in df_closed.columns else price * 0.01
     regime  = detect_market_regime(df_closed)
     supports, resistances = find_support_resistance(df_closed, price, tf)
-
     liquidity_tier, liquidity_warn = get_liquidity_tier(ticker, df_closed)
     
     effective_mode = dict(mode_cfg)
-    base_vol = mode_cfg.get("min_vol_ratio", 1.3)
-    if liquidity_tier == "medium":
-        
-        effective_mode["min_vol_ratio"] = round(max(0.9, base_vol - 0.15), 2)
-        
-        effective_mode["max_vol_ratio"] = 4.0
-    elif liquidity_tier == "low":
-        
-        effective_mode["min_vol_ratio"] = round(max(0.8, base_vol - 0.30), 2)
-        
-        effective_mode["max_vol_ratio"] = 3.0
-
     pd_levels  = get_previous_day_levels(df_closed)
     pd_level_name, pd_level_dist = get_pd_level_context(pd_levels, price)
     macd_div   = detect_macd_divergence(df_closed)
@@ -4594,13 +4569,21 @@ async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None
         htf_trend=htf_trend, pd_levels=pd_levels, macd_div=macd_div)
 
     price_anomaly = detect_price_anomaly(df_closed, tf)
-
     edisclosure_items: list = []
 
-    # AI оценка новостей — отложена: запускается после отправки сигнала
-    news_ai = {"confirmed": tech_signal, "ai_skip_reason": "deferred", 
-               "filter_status": "", "event_type": "", "event_weight": 0, "summary": ""}
-    final_signal = tech_signal
+    # ТВОЯ ЛОГИКА: Если ручной /analyze -> запрашиваем ИИ сразу. Если скан -> откладываем на фоновую задачу!
+    if run_ai:
+        try:
+            news_ai = await ai_evaluate_news(
+                news_items, ticker, sector, tech_signal, tech_score,
+                price_anomaly=price_anomaly, edisclosure_items=edisclosure_items, htf_trend=htf_trend
+            )
+        except Exception:
+            news_ai = {"confirmed": tech_signal, "filter_status": "CONFIRMED", "event_type": "", "event_weight": 0, "summary": ""}
+    else:
+        news_ai = {"confirmed": tech_signal, "ai_skip_reason": "deferred", "filter_status": "PENDING", "event_type": "", "event_weight": 0, "summary": ""}
+
+    final_signal = news_ai.get("confirmed", tech_signal)
 
     if imoex_regime and imoex_regime.get("regime") == "bear" and "LONG" in final_signal:
         final_signal = f"⚠️ {final_signal} (IMOEX медвежий)"
@@ -4609,203 +4592,49 @@ async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None
         phase_warn = session.get("warning", "")
         final_signal = f"⏸ {final_signal} ({phase_warn or session['label']})"
 
-    try:
-        cal_check = check_calendar_block(ticker)
-    except Exception as cal_err:
-        logger.warning(f"Ошибка календаря для {ticker}: {cal_err}")
-
-    cal_penalty = cal_check.get("score_penalty", 0)
-
-    if cal_check["block"] and ("LONG" in final_signal or "SHORT" in final_signal):
-        final_signal = f"🚫 {final_signal} - СТОП (важное событие через <30 мин)"
-    elif cal_penalty >= 15 and ("LONG" in final_signal or "SHORT" in final_signal):
-        if "CONFIRMED" in final_signal:
-            final_signal = final_signal.replace("CONFIRMED", "WEAK ⚠️ (событие)")
-
-    if cal_penalty > 0:
-        tech_score = max(0, tech_score - cal_penalty)
-
-    div_check = {"block": False, "already_passed": False, "dividend_info": ""}
-    try:
-        div_check = check_dividend_cutoff(ticker)
-    except Exception as div_err:
-        logger.warning(f"Ошибка проверки дивидендов для {ticker}: {div_err}")
-
-    if div_check["block"] and "LONG" in final_signal:
-        final_signal = f"🚫 {final_signal} - СТОП ({div_check['dividend_info']})"
-        tech_score = max(0, tech_score - 30)
-    elif div_check.get("already_passed") and "SHORT" in final_signal:
-        
-        days_since = abs(div_check.get("days_until", 0) or 0)
-        if days_since <= 2:
-            if "CONFIRMED" in final_signal:
-                final_signal = final_signal.replace(
-                    "CONFIRMED",
-                    f"WEAK ⚠️ (дивидендный гэп {days_since:.0f} дн. назад - "
-                    f"падение может быть механическим, не рыночным)"
-                )
-
-    try:
-        sector_check = check_signal_against_sector_modifier(sector, final_signal)
-    except Exception as sm_err:
-        logger.debug(f"check_signal_against_sector_modifier {ticker}: {sm_err}")
-        sector_check = {"conflict": False, "warning_ru": ""}
-
-    if sector_check["conflict"] and "CONFIRMED" in final_signal:
-        final_signal = final_signal.replace("CONFIRMED", "WEAK ⚠️ (геополитика)")
-
+    cal_check = check_calendar_block(ticker)
+    div_check = check_dividend_cutoff(ticker)
+    sector_check = check_signal_against_sector_modifier(sector, final_signal)
     sl_tp = calculate_sl_tp_stocks(tech_signal, price, atr, supports, resistances, pd_levels=pd_levels)
 
-    candle_progress_pct  = 0.0
-    candle_progress_note = ""
-    try:
-        last_open  = float(df["open"].iloc[-1])
-        last_high  = float(df["high"].iloc[-1])
-        last_low   = float(df["low"].iloc[-1])
-        candle_range = last_high - last_low
-        if candle_range > 0:
-            if "LONG" in tech_signal:
-                candle_progress_pct = (price - last_low)  / candle_range * 100
-            elif "SHORT" in tech_signal or "ВЫХОД" in tech_signal:
-                candle_progress_pct = (last_high - price) / candle_range * 100
-            else:
-                candle_progress_pct = (price - last_low)  / candle_range * 100
-            
-            candle_progress_pct = max(0.0, min(100.0, candle_progress_pct))
-        if candle_progress_pct >= 80:
-            candle_progress_note = (
-                f"⏳ <b>Поздний вход:</b> свеча пройдена на {candle_progress_pct:.0f}% - "
-                f"риск/доходность ухудшились. Жди следующей свечи или откат."
-            )
-        elif candle_progress_pct >= 55:
-            candle_progress_note = f"⚠️ Свеча пройдена на {candle_progress_pct:.0f}% - вход с осторожностью."
-        else:
-            candle_progress_note = f"✅ Свеча пройдена на {candle_progress_pct:.0f}% - вход актуален."
-    except Exception:
-        pass
-
+    # 🟢 ФИКС ДНЕВНОГО ATR (Считается всегда от 30-дневных свечей)
     daily_atr_progress_pct  = 0.0
     daily_atr_progress_note = ""
     try:
-        
-        df_daily = df_closed.copy()
-        df_daily["date"] = pd.to_datetime(df_daily["timestamp"]).dt.date if "timestamp" in df_daily.columns else None
-        if df_daily["date"] is not None and df_daily["date"].notna().any():
-            
-            day_group = df_daily.groupby("date").agg(
-                open=("open", "first"), high=("high", "max"),
-                low=("low", "min"),   close=("close", "last")
-            ).tail(20)
-            if len(day_group) >= 5:
-                
-                daily_ranges = (day_group["high"] - day_group["low"]).tail(14)
-                avg_daily_atr = float(daily_ranges.mean())
-                
-                today_high = float(day_group["high"].iloc[-1])
-                today_low  = float(day_group["low"].iloc[-1])
-                today_range = today_high - today_low
-                if avg_daily_atr > 0:
-                    daily_atr_progress_pct = today_range / avg_daily_atr * 100
-                    pct = round(daily_atr_progress_pct)
-                    if daily_atr_progress_pct >= 90:
-                        daily_atr_progress_note = (
-                            f"🔴 <b>Дневной ATR исчерпан на {pct}%</b> - день выдохся. "
-                            f"Новые входы очень рискованны."
-                        )
-                    elif daily_atr_progress_pct >= 70:
-                        daily_atr_progress_note = (
-                            f"🟡 Дневной ATR пройден на {pct}% - "
-                            f"потенциал движения ограничен."
-                        )
-                    else:
-                        daily_atr_progress_note = (
-                            f"🟢 Дневной ATR пройден на {pct}% - "
-                            f"пространство для движения есть."
-                        )
-    except Exception:
-        pass
-
-    try:
-        
-        has_direction = "LONG" in tech_signal or "SHORT" in tech_signal
-        logged_tech_score = tech_score if has_direction else 0
-
-        _rpush_log(RK_SIGNAL_LOG, {
-            "ts":           datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "ticker":       ticker,
-            "tf":           tf,
-            "price":        price,
-            "tech_signal":  tech_signal,
-            "tech_score":   logged_tech_score,
-            "final_signal": final_signal,
-            "filter_status": news_ai.get("filter_status", ""),
-            "event_type":   news_ai.get("event_type", ""),
-            "event_weight": news_ai.get("event_weight", 0),
-            "ai_summary":   news_ai.get("summary", ""),
-            "ai_skip_reason": news_ai.get("ai_skip_reason", ""),
-            "macd_div":     macd_div,
-            "htf_trend":    htf_trend.get("trend", "") if htf_trend else "",
-            "imoex_regime": imoex_regime.get("regime", "") if imoex_regime else "",
-            "candle_progress_pct":    round(candle_progress_pct, 1),
-            "daily_atr_progress_pct": round(daily_atr_progress_pct, 1),
-            "mtf_trends":    json.dumps(mtf_trends, ensure_ascii=False),
-            "daily_poc":     daily_poc,
-        })
-    except Exception as log_err:
-        logger.debug(f"Signal log write failed for {ticker}: {log_err}")
-
-    try:
-        # Регистрируем ВСЕ технические сигналы с целями в базе отслеживания исходов
-        if has_direction and sl_tp:
-            signal_id = f"{ticker}_{tf}_{int(time.time())}"
-            _pending_outcomes_add(signal_id, {
-                "ticker":        ticker,
-                "tf":            tf,
-                "direction":     "LONG" if "LONG" in tech_signal else "SHORT",
-                "signal_ts":     datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "entry_price":   price,
-                "sl":            sl_tp.get("sl", 0),
-                "tp1":           sl_tp.get("tp1", 0),
-                "tp2":           sl_tp.get("tp2", 0),
-                "tp3":           sl_tp.get("tp3", 0),
-                "tech_score":    logged_tech_score,
-                "filter_status": news_ai.get("filter_status", "CONFIRMED"),
-                "event_type":    news_ai.get("event_type", ""),
-                "figi":          MOEX_STOCKS.get(ticker, ("",))[0],
-                "mfe_pct":       0.0,
-                "mae_pct":       0.0,
-            })
-    except Exception as reg_err:
-        logger.debug(f"Retro outcome registration failed for {ticker}: {reg_err}")
+        if df_daily_res is not None and len(df_daily_res) >= 5:
+            daily_ranges = (df_daily_res["high"] - df_daily_res["low"]).tail(14)
+            avg_daily_atr = float(daily_ranges.mean())
+            today_high = float(df_daily_res["high"].iloc[-1])
+            today_low  = float(df_daily_res["low"].iloc[-1])
+            today_range = today_high - today_low
+            if avg_daily_atr > 0:
+                daily_atr_progress_pct = today_range / avg_daily_atr * 100
+                pct = round(daily_atr_progress_pct)
+                if daily_atr_progress_pct >= 90:
+                    daily_atr_progress_note = f"🔴 <b>Дневной ATR исчерпан на {pct}%</b> - день выдохся. Входы рискованны."
+                elif daily_atr_progress_pct >= 70:
+                    daily_atr_progress_note = f"🟡 Дневной ATR пройден на {pct}% - потенциал движения ограничен."
+                else:
+                    daily_atr_progress_note = f"🟢 Дневной ATR пройден на {pct}% - пространство для движения есть."
+    except Exception as atr_err:
+        logger.debug(f"Daily ATR error {ticker}: {atr_err}")
 
     return {
         "ticker": ticker, "name": name, "sector": sector, "tf": tf,
         "price": price, "atr": round(atr, 2), "atr_pct": round(atr / price * 100, 2),
         "tech_signal": tech_signal, "tech_score": tech_score, "tech_reasons": tech_reasons,
-        "regime": regime, "imoex_regime": imoex_regime,
-        "htf_trend": htf_trend, "pd_levels": pd_levels,
-        "pd_level_name": pd_level_name, "pd_level_dist": pd_level_dist,
-        "macd_div": macd_div, "session": session,
-        "news_items": news_items[:5], "news_ai": news_ai, "final_signal": final_signal,
-        "sl_tp": sl_tp, "supports": supports, "resistances": resistances,
-        "rsi_div": "",
-        "candle": detect_candle_pattern(df_closed),
-        "vol_ratio": round(_safe_vol_ratio(df_closed["vol_ratio"].iloc[-1]), 2),
-        "time_warning": session.get("warning", ""),
-        "calendar": cal_check,
-        "dividend": div_check,
-        "sector_modifier": sector_check,
-        "liquidity_tier": liquidity_tier,
-        "liquidity_warn": liquidity_warn,
-        "candle_progress_pct": round(candle_progress_pct, 1),
-        "candle_progress_note": candle_progress_note,
-        "daily_atr_progress_pct": round(daily_atr_progress_pct, 1),
-        "daily_atr_progress_note": daily_atr_progress_note,
-        "price_anomaly":      price_anomaly,
-        "edisclosure_items":  edisclosure_items[:3],
-        "mtf_trends":         mtf_trends,
-        "daily_poc":          daily_poc,
-    }
+        "regime": regime, "imoex_regime": imoex_regime, "htf_trend": htf_trend, "pd_levels": pd_levels,
+        "pd_level_name": pd_level_name, "pd_level_dist": pd_level_dist, "macd_div": macd_div, "session": session,
+        "news_items": news_items, "news_ai": news_ai, "final_signal": final_signal,
+        "sl_tp": sl_tp, "supports": supports, "resistances": resistances, "candle": detect_candle_pattern(df_closed),
+        "vol_ratio": round(_safe_vol_ratio(df_closed["vol_ratio"].iloc[-1]), 2), "time_warning": session.get("warning", ""),
+        "calendar": cal_check, "dividend": div_check, "sector_modifier": sector_check,
+        "liquidity_tier": liquidity_tier, "liquidity_warn": liquidity_warn,
+        "candle_progress_pct": round(candle_progress_pct, 1), "candle_progress_note": candle_progress_note,
+        "daily_atr_progress_pct": round(daily_atr_progress_pct, 1), "daily_atr_progress_note": daily_atr_progress_note,
+        "price_anomaly": price_anomaly, "edisclosure_items": edisclosure_items[:3],
+        "mtf_trends": mtf_trends, "daily_poc": daily_poc,
+}
 
 def format_analysis(result: dict) -> str:
     if "error" in result:
