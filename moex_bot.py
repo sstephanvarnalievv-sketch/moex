@@ -3143,99 +3143,57 @@ def _ai_cache_set(prompt: str, response: str):
             del _AI_CACHE[k]
 
 
-def _groq_call(prompt: str, model_idx: int = 0) -> str:
-    """Groq fallback - ispolzuetsya esli Gemini nedostupen ili vernul pustoy otvet."""
+def _gemini_call(prompt: str) -> str:
+    """1. Gemini Primary -> Мгновенный переход на Groq при любой ошибке/429."""
+    if not get_ai_enabled():
+        return ""
+
+    cached = _ai_cache_get(prompt)
+    if cached:
+        return cached
+
+    if _gemini_client and GEMINI_MODEL:
+        try:
+            response = _gemini_client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(
+                    temperature=0.05,
+                    max_output_tokens=400,
+                ) if genai_types else None,
+            )
+            result = response.text.strip() if response.text else ""
+            if result:
+                _ai_cache_set(prompt, result)
+                return result
+        except Exception as e:
+            logger.warning(f"Gemini error/limit ({e}) -> мгновенный перевод на Groq")
+
+    return _groq_call(prompt)
+
+
+def _groq_call(prompt: str) -> str:
+    """2. Groq Fallback -> Мгновенный переход на OpenRouter при ошибке/429."""
     if not get_ai_enabled():
         return ""
     if not groq_client:
         return _openrouter_call(prompt)
-    # Proverka na ischerpanie sutochnoy kvoty
-    if getattr(_groq_call, "_daily_quota_exhausted", False):
-        elapsed = time.time() - _groq_call._daily_quota_exhausted
-        if elapsed < 21600:
-            logger.warning(f"Groq daily quota exhausted, skip for {21600 - elapsed:.0f}s")
-            return _openrouter_call(prompt)
-        _groq_call._daily_quota_exhausted = False
 
-    for i in range(model_idx, len(GROQ_MODELS)):
-        for attempt in range(3):
-            try:
-                resp = groq_client.chat.completions.create(
-                    model=GROQ_MODELS[i],
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=400, temperature=0.05,
-                )
-                result = resp.choices[0].message.content.strip()
+    for model in GROQ_MODELS:
+        try:
+            resp = groq_client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=400, temperature=0.05,
+            )
+            result = resp.choices[0].message.content.strip()
+            if result:
                 _ai_cache_set(prompt, result)
                 return result
-            except Exception as e:
-                err = str(e)
-                if "rate_limit" in err.lower() or "429" in err or "too many" in err.lower():
-                    jitter = __import__("random").uniform(0, 1)
-                    wait = 2 ** attempt + jitter
-                    logger.warning(f"Groq rate limit {GROQ_MODELS[i]}, retry {attempt+1} in {wait:.1f}s")
-                    time.sleep(wait)
-                elif "quota" in err.lower() or "exhausted" in err.lower() or "limit reached" in err.lower():
-                    logger.warning(f"Groq daily quota exhausted, backing off 1h")
-                    _groq_call._daily_quota_exhausted = time.time()
-                    break
-                else:
-                    logger.warning(f"Groq {GROQ_MODELS[i]}: {e}")
-                    break
-    result = _openrouter_call(prompt)
-    if result:
-        return result
-    return ""
-def _gemini_call(prompt: str) -> str:
-    """Gemini primary (google-genai SDK) -> Groq fallback pri oshibke ili pustom otvete."""
-    if not get_ai_enabled():
-        logger.debug("AI disabled, skipping _gemini_call")
-        return ""
-    # Proverka kesha
-    cached = _ai_cache_get(prompt)
-    if cached:
-        return cached
-    # Proverka na ischerpanie sutochnoy kvoty
-    if getattr(_gemini_call, "_daily_quota_exhausted", False):
-        elapsed = time.time() - _gemini_call._daily_quota_exhausted
-        if elapsed < 21600:
-            logger.warning(f"Gemini daily quota exhausted, switching to Groq")
-            return _groq_call(prompt)
-        _gemini_call._daily_quota_exhausted = False
+        except Exception as e:
+            logger.warning(f"Groq {model} error ({e}) -> переход к следующему нейро-провайдеру")
 
-    if _gemini_client and GEMINI_MODEL:
-        for attempt in range(3):
-            try:
-                response = _gemini_client.models.generate_content(
-                    model=GEMINI_MODEL,
-                    contents=prompt,
-                    config=genai_types.GenerateContentConfig(
-                        temperature=0.05,
-                        max_output_tokens=400,
-                    ) if genai_types else None,
-                )
-                result = response.text.strip() if response.text else ""
-                if result:
-                    _ai_cache_set(prompt, result)
-                    return result
-                logger.warning(f"Gemini try {attempt+1}: pustoy otvet")
-            except Exception as e:
-                err = str(e)
-                if "429" in err.lower() or "quota" in err.lower() or "rate" in err.lower() or "too many" in err.lower():
-                    jitter = __import__("random").uniform(0, 1)
-                    wait = 2 ** attempt + jitter
-                    logger.warning(f"Gemini rate limit, attempt {attempt+1}, retry in {wait:.1f}s")
-                    time.sleep(wait)
-                elif "exhausted" in err.lower() or "resource_exhausted" in err.lower():
-                    logger.warning(f"Gemini quota exhausted, switching to Groq")
-                    _gemini_call._daily_quota_exhausted = time.time()
-                    break
-                else:
-                    logger.warning(f"Gemini try {attempt+1} failed: {e}")
-                    break
-
-    logger.info("AI: pereklyuchayus na Groq fallback")
-    return _groq_call(prompt)
+    return _openrouter_call(prompt)
 
 def _openrouter_call(prompt: str) -> str:
     """OpenRouter fallback - ispolzuetsya esli Gemini i Groq nedostupny."""
