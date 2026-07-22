@@ -4846,7 +4846,7 @@ def format_analysis(result: dict) -> str:
         slope_arrow = "↑" if imoex.get("slope_10d", 0) > 0 else "↓"
         imoex_price = imoex.get("price", 0)  
         tk_used = imoex.get("ticker_used", "MOEX")
-price_part = f"{tk_used}: {imoex_price:,.2f} ₽  " if imoex_price else ""
+        price_part = f"{tk_used}: {imoex_price:,.2f} ₽  " if imoex_price else ""
         lines.append(
             f"<b>🏛 {esc(imoex['label'])}</b>  "
             f"{price_part}{slope_arrow}{imoex.get('slope_10d',0):+.2f}%"
