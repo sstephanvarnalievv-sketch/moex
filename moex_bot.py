@@ -2373,7 +2373,7 @@ async def _fetch_rss(session: aiohttp.ClientSession, url: str, headers: dict) ->
     try:
         async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as r:
             if r.status != 200:
-                logger.warning(f"RSS fetch FAIL HTTP {r.status}: {url}")
+                logger.warning(f"RSS HTTP {r.status}: {url}")
                 return []
             text = await r.text(errors="replace")
             root = ET.fromstring(text)
@@ -2386,9 +2386,9 @@ async def _fetch_rss(session: aiohttp.ClientSession, url: str, headers: dict) ->
                     "desc": item.findtext("description", "")[:300],
                 })
             
-            # Логируем успешную загрузку телеграм-каналов
             if "/telegram/channel/" in url:
-                logger.info(f"✅ Telegram RSSHub OK: {url.split('/')[-1]} ({len(items)} новостей)")
+                ch_name = url.split("/")[-1]
+                logger.info(f"✅ Telegram RSSHub OK: {ch_name} ({len(items)} новостей)")
             return items
     except Exception as e:
         now_rss = time.time()
@@ -2396,7 +2396,7 @@ async def _fetch_rss(session: aiohttp.ClientSession, url: str, headers: dict) ->
             _fetch_rss._last_errors = {}
         last_ts = _fetch_rss._last_errors.get(url, 0)
         if now_rss - last_ts > 300:
-            logger.warning(f"RSS Error {url}: {e}")
+            logger.warning(f"RSS error {url}: {e}")
             _fetch_rss._last_errors[url] = now_rss
         return []
 
@@ -8523,10 +8523,22 @@ async def _build_diagnostics_report() -> list[str]:
 
     
     # 6. Проверка RSS источников и личного RSSHub
-    rss_count = len(RUSSIAN_NEWS_RSS) + len(COMMODITY_NEWS_RSS)
-    status["✅"].append(f"📰 RSS источников подключено: {rss_count}")
+    russian_count = len(RUSSIAN_NEWS_RSS)
+    commodity_count = len(COMMODITY_NEWS_RSS)
+    total_rss = russian_count + commodity_count
+    status["✅"].append(f"📰 RSS источников настроено: {total_rss} (РФ + ТГ: {russian_count}, Мировые: {commodity_count})")
+
     if RSSHUB_URL:
-        status["✅"].append(f"📡 Собственный RSSHub: подключен ({RSSHUB_URL})")
+        test_url = f"{RSSHUB_URL}/telegram/channel/markettwits"
+        try:
+            session = _get_http_session()
+            async with session.get(test_url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status == 200:
+                    status["✅"].append(f"📡 Личный RSSHub ({RSSHUB_URL}): РАБОТАЕТ (HTTP 200 OK)")
+                else:
+                    status["⚠️"].append(f"📡 Личный RSSHub ({RSSHUB_URL}): отвечает HTTP {resp.status} - добавьте TELEGRAM_BOT_TOKEN в настройки RSSHub в Railway")
+        except Exception as rss_err:
+            status["⚠️"].append(f"📡 Личный RSSHub ({RSSHUB_URL}): ошибка подключения ({rss_err})")
     else:
         status["⚠️"].append("📡 RSSHub: переменная RSSHUB_URL не задана в Railway")
     
