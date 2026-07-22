@@ -1729,10 +1729,19 @@ async def fetch_imoex_regime() -> dict:
     if cache_key in _cache and now - _cache[cache_key]["ts"] < 1200:
         return _cache[cache_key]["val"]
     try:
-        figi = MOEX_STOCKS["SBER"][0]
+        # ИСПРАВЛЕНИЕ: Берем тикер MOEX (МосБиржа) как прямой прокси рынка
+        imoex_ticker = "MOEX" if "MOEX" in MOEX_STOCKS else "SBER"
+        figi = MOEX_STOCKS[imoex_ticker][0]
         df = await fetch_candles_tinkoff(figi, "CANDLE_INTERVAL_DAY", 120)
-        if df is None or len(df) < 50:
-            raise ValueError("Недостаточно данных для IMOEX-прокси (SBER)")
+        
+        # Если по MOEX данных нет, пробуем SBER как запасной
+        if df is None or len(df) < 30:
+            imoex_ticker = "SBER"
+            figi = MOEX_STOCKS["SBER"][0]
+            df = await fetch_candles_tinkoff(figi, "CANDLE_INTERVAL_DAY", 120)
+
+        if df is None or len(df) < 30:
+            raise ValueError("Недостаточно данных для IMOEX-прокси")
 
         close = df["close"].values
         price = close[-1]
@@ -1762,13 +1771,14 @@ async def fetch_imoex_regime() -> dict:
             "regime": regime, "label": label,
             "price": round(price, 2), "ema20": round(ema20, 2), "ema50": round(ema50, 2),
             "slope_10d": round(slope_10d, 3), "slope_20d": round(slope_20d, 3),
+            "ticker_used": imoex_ticker,
         }
         _cache[cache_key] = {"val": result, "ts": now}
         return result
     except Exception as e:
         logger.warning(f"fetch_imoex_regime: {e}")
         fallback = {"regime": "neutral", "label": "⚪ IMOEX: тренд неопределен",
-                     "price": 0, "ema20": 0, "ema50": 0, "slope_10d": 0, "slope_20d": 0}
+                     "price": 0, "ema20": 0, "ema50": 0, "slope_10d": 0, "slope_20d": 0, "ticker_used": "MOEX"}
         _cache[cache_key] = {"val": fallback, "ts": now - 900}
         return fallback
 
