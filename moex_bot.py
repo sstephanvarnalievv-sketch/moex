@@ -2113,6 +2113,9 @@ RUSSIAN_NEWS_RSS = [
     "https://tass.ru/rss/v2.xml",
     "https://www.kommersant.ru/RSS/news.xml",
     "https://smart-lab.ru/blog/feed/",
+    "https://1prime.ru/export/rss2/index.xml",
+    "https://www.finam.ru/analysis/conews/rsspoint/",
+    "https://rbc.ru/rss",
     
     _tg("interfaxonline"),   
     _tg("cbr_official"),     
