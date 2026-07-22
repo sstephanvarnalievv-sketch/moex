@@ -2371,8 +2371,9 @@ def classify_news_item(title: str) -> dict:
 
 async def _fetch_rss(session: aiohttp.ClientSession, url: str, headers: dict) -> list[dict]:
     try:
-        async with session.get(url, headers=headers) as r:
+        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as r:
             if r.status != 200:
+                logger.warning(f"RSS fetch FAIL HTTP {r.status}: {url}")
                 return []
             text = await r.text(errors="replace")
             root = ET.fromstring(text)
@@ -2384,15 +2385,18 @@ async def _fetch_rss(session: aiohttp.ClientSession, url: str, headers: dict) ->
                     "pub": item.findtext("pubDate", "")[:16],
                     "desc": item.findtext("description", "")[:300],
                 })
+            
+            # Логируем успешную загрузку телеграм-каналов
+            if "/telegram/channel/" in url:
+                logger.info(f"✅ Telegram RSSHub OK: {url.split('/')[-1]} ({len(items)} новостей)")
             return items
     except Exception as e:
-        # Подавляем повторные ошибки одного URL (лог раз в 5 минут)
         now_rss = time.time()
         if not hasattr(_fetch_rss, "_last_errors"):
             _fetch_rss._last_errors = {}
         last_ts = _fetch_rss._last_errors.get(url, 0)
         if now_rss - last_ts > 300:
-            logger.warning(f"RSS {url}: {e}")
+            logger.warning(f"RSS Error {url}: {e}")
             _fetch_rss._last_errors[url] = now_rss
         return []
 
