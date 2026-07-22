@@ -4729,8 +4729,8 @@ async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None
         logger.debug(f"Signal log write failed for {ticker}: {log_err}")
 
     try:
-        _fs = news_ai.get("filter_status", "")
-        if has_direction and _fs in ("CONFIRMED", "WEAK", "NEWS_ONLY") and sl_tp:
+        # Регистрируем ВСЕ технические сигналы с целями в базе отслеживания исходов
+        if has_direction and sl_tp:
             signal_id = f"{ticker}_{tf}_{int(time.time())}"
             _pending_outcomes_add(signal_id, {
                 "ticker":        ticker,
@@ -4743,9 +4743,9 @@ async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None
                 "tp2":           sl_tp.get("tp2", 0),
                 "tp3":           sl_tp.get("tp3", 0),
                 "tech_score":    logged_tech_score,
-                "filter_status": _fs,
-                "figi":          MOEX_STOCKS.get(ticker, ("",))[0],
+                "filter_status": news_ai.get("filter_status", "CONFIRMED"),
                 "event_type":    news_ai.get("event_type", ""),
+                "figi":          MOEX_STOCKS.get(ticker, ("",))[0],
                 "mfe_pct":       0.0,
                 "mae_pct":       0.0,
             })
