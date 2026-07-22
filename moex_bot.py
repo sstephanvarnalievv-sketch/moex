@@ -1520,17 +1520,18 @@ async def fetch_candles_tinkoff(figi: str, interval: str, limit: int) -> pd.Data
     if cache_key in _cache and now - _cache[cache_key]["ts"] < 120:
         return _cache[cache_key]["df"]
 
-    interval_minutes = {
-        "CANDLE_INTERVAL_1_MIN": 1, "CANDLE_INTERVAL_5_MIN": 5,
-        "CANDLE_INTERVAL_15_MIN": 15, "CANDLE_INTERVAL_HOUR": 60,
-        "CANDLE_INTERVAL_4_HOUR": 240, "CANDLE_INTERVAL_DAY": 1440,
-        "CANDLE_INTERVAL_WEEK": 10080,
-    }.get(interval, 1440)
-
-    trading_minutes_per_day = 830
-    trading_days_needed = max(2, (limit * interval_minutes) // trading_minutes_per_day + 2)
-    delta_days = int(trading_days_needed * 1.5) + 3
-    delta_days = max(delta_days, 5)
+    # ИСПРАВЛЕНИЕ: Жёсткие лимиты Tinkoff API на диапазон дат.
+    # Для 1m, 5m, 15m нельзя просить больше 1-2 дней, иначе API отдает 0 свечей!
+    max_days_by_interval = {
+        "CANDLE_INTERVAL_1_MIN":   1,
+        "CANDLE_INTERVAL_5_MIN":   1,
+        "CANDLE_INTERVAL_15_MIN":  2,  # 2 дня идеально покрывают 15м свечи
+        "CANDLE_INTERVAL_HOUR":    7,
+        "CANDLE_INTERVAL_4_HOUR":  7,
+        "CANDLE_INTERVAL_DAY":     30,
+        "CANDLE_INTERVAL_WEEK":   100,
+    }
+    delta_days = max_days_by_interval.get(interval, 2)
 
     _utcnow = datetime.now(timezone.utc).replace(tzinfo=None)
     dt_from = _utcnow - timedelta(days=delta_days)
@@ -1606,6 +1607,7 @@ async def fetch_candles_tinkoff(figi: str, interval: str, limit: int) -> pd.Data
             logger.debug(f"Converted {figi} prices USD→RUB at rate {rate:.2f}")
 
     _cache[cache_key] = {"df": df, "ts": now}
+    return df
 
 # === MOEX ISS fallback for candles ===
 _MOEX_INTERVAL_MAP = {
