@@ -7510,17 +7510,14 @@ async def run_scanner_broadcast(app):
         except Exception as e:
             logger.warning(f"Broadcast failed for {chat_id}: {e}")
 
-    # Фоновая AI дооценка сигналов (если AI был отложен)
+    # Запускаем фоновый ИИ СРАЗУ ПОСЛЕ отправки тех-сигнала
     for s in new_sigs[:5]:
-        if s.get("news_ai", {}).get("ai_skip_reason") == "deferred":
-            ticker_s = s["ticker"]
-            asyncio.create_task(_background_ai_evaluation(
-                app, ticker_s, s.get("sector", ""),
-                s.get("news_items", []),
-                s.get("tech_signal", ""),
-                s.get("tech_score", 0),
-                s.get("price", 0),
-            ))
+        asyncio.create_task(_background_ai_evaluation(
+            app, s["ticker"], s.get("sector", ""),
+            s.get("news_items", []), s.get("tech_signal", ""),
+            s.get("tech_score", 0), s.get("price", 0),
+            s.get("sl_tp", {}), tf
+        ))
 
 _last_news_signals: set = set()
 
