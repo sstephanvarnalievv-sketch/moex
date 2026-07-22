@@ -8522,12 +8522,13 @@ async def _build_diagnostics_report() -> list[str]:
             status["⚠️"].append(f"📊 Tinkoff API тест: {tinkoff_err}")
 
     
-    # 6. Проверка RSS источников
-    rss_count = len(COMMODITY_NEWS_RSS)
-    if rss_count > 0:
-        status["✅"].append(f"📰 RSS источников настроено: {rss_count}")
+    # 6. Проверка RSS источников и личного RSSHub
+    rss_count = len(RUSSIAN_NEWS_RSS) + len(COMMODITY_NEWS_RSS)
+    status["✅"].append(f"📰 RSS источников подключено: {rss_count}")
+    if RSSHUB_URL:
+        status["✅"].append(f"📡 Собственный RSSHub: подключен ({RSSHUB_URL})")
     else:
-        status["❌"].append("📰 RSS источников: не настроено")
+        status["⚠️"].append("📡 RSSHub: переменная RSSHUB_URL не задана в Railway")
     
     # 7. Проверка календаря событий
     try:
