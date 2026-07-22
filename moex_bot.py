@@ -1612,10 +1612,10 @@ async def fetch_candles_tinkoff(figi: str, interval: str, limit: int) -> pd.Data
 # === MOEX ISS fallback for candles ===
 _MOEX_INTERVAL_MAP = {
     "CANDLE_INTERVAL_1_MIN": 1,
-    "CANDLE_INTERVAL_5_MIN": 5,
-    "CANDLE_INTERVAL_15_MIN": 15,
+    "CANDLE_INTERVAL_5_MIN": 10,   # MOEX ISS поддерживает только 1, 10, 60, 24
+    "CANDLE_INTERVAL_15_MIN": 10,  # MOEX ISS поддерживает только 1, 10, 60, 24
     "CANDLE_INTERVAL_HOUR": 60,
-    "CANDLE_INTERVAL_4_HOUR": 60,  # MOEX не поддерживает 4ч, используем 60мин
+    "CANDLE_INTERVAL_4_HOUR": 60,
     "CANDLE_INTERVAL_DAY": 24,
     "CANDLE_INTERVAL_WEEK": 7,
 }
