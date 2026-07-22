@@ -6995,11 +6995,11 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if sl_tp and sl_tp.get("sl"):
             p  = s["price"]; sl = sl_tp.get("sl",0)
             t1 = sl_tp.get("tp1",0); t2 = sl_tp.get("tp2",0); t3 = sl_tp.get("tp3",0)
-            key = f"{s["ticker"]}_{direction}_{int(time.time())}"[-20:]
+            key = f"{s['ticker']}_{direction}_{int(time.time())}"[-20:]
             _cleanup_pending_trades()
             _pending_trades[key] = {"ticker": s["ticker"], "direction": direction,
-                                                "entry": p, "sl": sl, "tp1": t1, "tp2": t2, "tp3": t3,
-                                                "ts": time.time()}
+                                    "entry": p, "sl": sl, "tp1": t1, "tp2": t2, "tp3": t3,
+                                    "ts": time.time()}
             row.append(InlineKeyboardButton(
                 f"✅ {direction}",
                 callback_data=f"enter2_{key}"
