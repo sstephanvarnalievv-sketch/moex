@@ -1512,7 +1512,7 @@ async def _get_usd_rub() -> float:
             return price
     except Exception:
         pass
-    return _usd_rub_rate if _usd_rub_rate > 0 else 75.0  
+    return _usd_rub_rate if _usd_rub_rate > 0 else 90.0  
 
 async def fetch_candles_tinkoff(figi: str, interval: str, limit: int) -> pd.DataFrame | None:
     cache_key = f"candles_{figi}_{interval}_{limit}"
