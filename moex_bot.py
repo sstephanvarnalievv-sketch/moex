@@ -4224,158 +4224,60 @@ def compute_tech_score(df: pd.DataFrame, mode_cfg: dict,
         elif close < ema9 < ema20:
             short_gates += 1
             short_r.append("EMA9 < EMA20 (медвежий импульс)")
-    elif ema20 > 0 and ema50 > 0:
-        if close > ema20 > ema50:
-            long_gates += 1
-            long_r.append("EMA20 > EMA50 (восходящий тренд)")
-        elif close < ema20 < ema50:
-            short_gates += 1
-            short_r.append("EMA20 < EMA50 (нисходящий тренд)")
 
     min_vol = mode_cfg.get("min_vol_ratio", 1.3)
     if vol_r < min_vol:
-        return "НЕТ СИГНАЛА", 0, [f"Низкий объём (x{vol_r:.1f} < x{min_vol:.1f} - нет подтверждения)"]
-    max_vol = mode_cfg.get("max_vol_ratio")
-    if max_vol and vol_r > max_vol:
-        return "НЕТ СИГНАЛА", 0, [f"Аномальный объём (x{vol_r:.1f} > x{max_vol:.1f}) - возможный памп/сквиз, пропускаем"]
+        return "НЕТ СИГНАЛА", 0, [f"Низкий объём (x{vol_r:.1f} < x{min_vol:.1f})"]
 
-    rsi_warning = ""
-    rsi_penalty = 0
     if long_gates > short_gates:
         direction = "long"
-        if rsi > 78:
-            rsi_penalty = 20
-            rsi_warning = f"⚠️ RSI высокий ({rsi:.0f}) - возможна коррекция"
-        elif rsi > 72:
-            rsi_penalty = 10
-            rsi_warning = f"RSI повышен ({rsi:.0f}) - следи за откатом"
     elif short_gates > long_gates:
         direction = "short"
-        if rsi < 22:
-            rsi_penalty = 20
-            rsi_warning = f"⚠️ RSI низкий ({rsi:.0f}) - возможен отскок"
-        elif rsi < 28:
-            rsi_penalty = 10
-            rsi_warning = f"RSI понижен ({rsi:.0f}) - следи за отскоком"
     else:
-        return "НЕТ СИГНАЛА", 0, ["Противоречивые сигналы - нет чёткого направления"]
+        return "НЕТ СИГНАЛА", 0, ["Противоречивые сигналы"]
 
     score = 50
-    if rsi_penalty:
-        score -= rsi_penalty
-        if direction == "long":
-            long_r.append(rsi_warning)
-        else:
-            short_r.append(rsi_warning)
+
+    # 1. ПОДKРУТКА: Повышенный вес за Дивергенцию MACD (было 18 -> стало 25!)
+    if macd_div:
+        if direction == "long" and "Бычья" in macd_div:
+            score += 25
+            long_r.append("🔥 " + macd_div)
+        elif direction == "short" and "Медвежья" in macd_div:
+            score += 25
+            short_r.append("🔥 " + macd_div)
+
+    # 2. ПОДKРУТКА: Штраф за поздний вход в свечу (>80% пройдено)
+    try:
+        last_high = float(df["high"].iloc[-1])
+        last_low  = float(df["low"].iloc[-1])
+        c_rng = last_high - last_low
+        if c_rng > 0:
+            c_prog = (close - last_low) / c_rng * 100 if direction == "long" else (last_high - close) / c_rng * 100
+            if c_prog >= 80:
+                score -= 15
+                (long_r if direction == "long" else short_r).append(f"⚠️ Поздний вход (свеча {c_prog:.0f}%)")
+    except Exception:
+        pass
+
+    # 3. ПОДKРУТКА: Строгий фильтр LONG при медвежьем IMOEX
+    min_score = mode_cfg.get("min_score", 70)
+    if imoex_regime:
+        ir = imoex_regime.get("regime", "neutral")
+        if ir == "bear" and direction == "long":
+            score -= 10
+            min_score += 10  # Требуем минимум 80 баллов для LONG на падающем рынке!
+            long_r.append("⚠️ Рынку тяжело (IMOEX bear)")
 
     if has_vwap:
         dev = abs(vwap_dev)
         if dev > 1.0:   score += 15
         elif dev > 0.5: score += 8
-        elif dev > 0.2: score += 3
 
-    if vol_r > 3.0:   score += 20
-    elif vol_r > 2.0: score += 12
-    elif vol_r > 1.5: score += 6
-
-    if htf_bias == "bull":
-        if direction == "long":
-            score += 12
-            long_r.append(f"✅ {htf_trend['htf'].upper()} тренд бычий - направление совпадает")
-        else:
-            score -= 20
-            short_r.append(f"⚠️ {htf_trend['htf'].upper()} тренд бычий - SHORT против тренда")
-    elif htf_bias == "bear":
-        if direction == "short":
-            score += 12
-            short_r.append(f"✅ {htf_trend['htf'].upper()} тренд медвежий - направление совпадает")
-        else:
-            score -= 20
-            long_r.append(f"⚠️ {htf_trend['htf'].upper()} тренд медвежий - LONG против тренда")
-
-    if pd_levels:
-        pdh = pd_levels.get("pdh", 0)
-        pdl = pd_levels.get("pdl", 0)
-        pdc = pd_levels.get("pdc", 0)
-        pdm = pd_levels.get("pdm", 0)
-        touch = 0.002
-        if direction == "long":
-            if pdl and abs(close - pdl) / pdl < touch:
-                score += 15
-                long_r.append(f"📌 Отбой от PDL ({pdl:,.2f})")
-            elif pdc and abs(close - pdc) / pdc < touch and close > pdc:
-                score += 10
-                long_r.append(f"📌 Выше PDC ({pdc:,.2f})")
-            elif pdm and abs(close - pdm) / pdm < touch:
-                score += 7
-                long_r.append(f"📌 Зона PDM ({pdm:,.2f})")
-            if pdh and close > pdh * 1.001:
-                score += 8
-                long_r.append(f"🚀 Пробой PDH ({pdh:,.2f})")
-        else:
-            if pdh and abs(close - pdh) / pdh < touch:
-                score += 15
-                short_r.append(f"📌 Отбой от PDH ({pdh:,.2f})")
-            elif pdc and abs(close - pdc) / pdc < touch and close < pdc:
-                score += 10
-                short_r.append(f"📌 Ниже PDC ({pdc:,.2f})")
-            elif pdm and abs(close - pdm) / pdm < touch:
-                score += 7
-                short_r.append(f"📌 Зона PDM ({pdm:,.2f})")
-            if pdl and close < pdl * 0.999:
-                score += 8
-                short_r.append(f"🔻 Пробой PDL ({pdl:,.2f})")
-
-    if macd_div:
-        if direction == "long" and "Бычья" in macd_div:
-            score += 18
-            long_r.append(macd_div)
-        elif direction == "short" and "Медвежья" in macd_div:
-            score += 18
-            short_r.append(macd_div)
-        elif direction == "long" and "Медвежья" in macd_div:
-            score -= 10
-        elif direction == "short" and "Бычья" in macd_div:
-            score -= 10
-
-    if day_open > 0:
-        dev_open = (close / day_open - 1) * 100
-        if direction == "long" and close > day_open * 1.003:
-            score += 8
-            long_r.append(f"Выше открытия дня ({dev_open:+.1f}%)")
-        elif direction == "short" and close < day_open * 0.997:
-            score += 8
-            short_r.append(f"Ниже открытия дня ({dev_open:+.1f}%)")
-
-    if direction == "long" and macd_h > 0:
-        score += 6; long_r.append("MACD > 0")
-    elif direction == "short" and macd_h < 0:
-        score += 6; short_r.append("MACD < 0")
-
-    if 40 < rsi < 60:
-        score += 4
-    elif direction == "long" and 60 < rsi < 70:
-        score += 2
-    elif direction == "short" and 30 < rsi < 40:
-        score += 2
-
-    if direction == "long" and ("Бычье" in candle or "снизу" in candle):
-        score += 8; long_r.append(candle)
-    elif direction == "short" and ("Медвежье" in candle or "сверху" in candle):
-        score += 8; short_r.append(candle)
-
-    if imoex_regime:
-        ir = imoex_regime.get("regime", "neutral")
-        if ir == "bear" and direction == "long":
-            score -= 15
-            long_r.append("⚠️ IMOEX медвежий")
-        elif ir == "bull" and direction == "long":
-            score += 5
-        elif ir == "bear" and direction == "short":
-            score += 5
+    if vol_r > 2.5:   score += 15
+    elif vol_r > 1.5: score += 8
 
     score = min(100, max(0, score))
-    min_score = mode_cfg.get("min_score", 70)
 
     if direction == "long":
         signal = "🟩 LONG" if score >= min_score else "НЕТ СИГНАЛА"
@@ -4385,6 +4287,7 @@ def compute_tech_score(df: pd.DataFrame, mode_cfg: dict,
         reasons = short_r
 
     return signal, score, reasons
+    
 
 def calculate_daily_poc(df_daily) -> float | None:
     """
