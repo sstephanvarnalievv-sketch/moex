@@ -6457,6 +6457,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     period_label = f"за {period_days} дн." if period_days else "за всё время"
 
+    # ИСПРАВЛЕНИЕ: Заменены невалидные теги <span> на <b>!
     lines = [
         f"📊 <b>СТАТИСТИКА СДЕЛОК</b> ({period_label})",
         "",
@@ -6465,8 +6466,8 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Средний P&L: <b>{avg_pnl:+.2f}%</b>",
         f"Суммарный P&L: <b>{total_pnl:+.2f}%</b>",
         "",
-        f"Средний выигрыш: <span>{avg_win:+.2f}%</span>",
-        f"Средний убыток: <span>{avg_loss:+.2f}%</span>",
+        f"Средний выигрыш: <b>{avg_win:+.2f}%</b>",
+        f"Средний убыток: <b>{avg_loss:+.2f}%</b>",
     ]
 
     if longs or shorts:
