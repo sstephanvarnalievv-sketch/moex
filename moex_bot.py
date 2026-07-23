@@ -7465,73 +7465,52 @@ async def run_scanner_broadcast(app):
 
     if scan_stats["failed_pct"] >= 50:
         _scanner_failure_state["consecutive_data_failures"] += 1
-        logger.warning(f"run_scanner_broadcast: {scan_stats['failed']}/{scan_stats['total']} "
-                       f"тикеров не удалось получить ({scan_stats['failed_pct']:.0f}%), "
-                       f"цикл провала #{_scanner_failure_state['consecutive_data_failures']}")
-        if _scanner_failure_state["consecutive_data_failures"] >= 2:
-            now_ts = time.time()
-            since_last = now_ts - _scanner_failure_state["last_failure_notify_ts"]
-            if since_last >= SCANNER_FAILURE_NOTIFY_COOLDOWN:
-                await _notify_scanner_issue(
-                    app,
-                    f"⚠️ <b>Проблема с получением данных</b>\n"
-                    f"Не удалось получить котировки по {scan_stats['failed']} из "
-                    f"{scan_stats['total']} тикеров ({scan_stats['failed_pct']:.0f}%) "
-                    f"на протяжении нескольких циклов.\n"
-                    f"Похоже на сбой Tinkoff API - сигналы могут не приходить "
-                    f"до восстановления."
-                )
-                _scanner_failure_state["last_failure_notify_ts"] = now_ts
-                _scanner_failure_state["was_failing"] = True
         return
 
     _scanner_failure_state["consecutive_data_failures"] = 0
-
     all_sigs = long_sigs + short_sigs
     if not all_sigs:
         return
+
     new_sigs = [s for s in all_sigs if f"{s['ticker']}_{s['tech_signal']}" not in _last_broadcast_signals]
     if not new_sigs:
         return
-    for s in new_sigs:
+
+    for s in new_sigs[:5]:
         _last_broadcast_signals.add(f"{s['ticker']}_{s['tech_signal']}")
         direction = "LONG" if "LONG" in s["tech_signal"] else "SHORT"
         _register_signal_time(s["ticker"], direction)
-    ts_scan = msk_now().strftime("%H:%M")
-    
-    lines = [
-        f"🔔 <b>НОВЫЕ ИНТРАДЕЙ СИГНАЛЫ [{tf}] | {ts_scan} МСК</b>",
-        f"<i>Сигналы актуальны ~30 мин. Сделки закройте до 23:50 МСК.</i>",
-        "",
-    ]
-    for s in new_sigs[:5]:
-        lines.append(_format_scan_row(s))
-        lines.append("")
-    text = "\n".join(lines)
 
-    kb = []
-    for s in new_sigs[:5]:
+        # 1. МГНОВЕННО формируем первичную карточку сигнала с плашкой ожидания ИИ
+        s["news_ai"] = {
+            "filter_status": "PENDING",
+            "event_weight": 0,
+            "summary": "⏳ AI анализ новостей, макрофона и ЦБ...",
+        }
+        initial_text = format_analysis(s)
+
         sl_tp = s.get("sl_tp", {})
-        if sl_tp and sl_tp.get("sl"):
-            direction = "LONG" if "LONG" in s["tech_signal"] else "SHORT"
-            p  = s["price"]; sl = sl_tp.get("sl", 0)
-            t1 = sl_tp.get("tp1", 0); t2 = sl_tp.get("tp2", 0); t3 = sl_tp.get("tp3", 0)
-            key = f"{s['ticker']}_{direction}_{int(time.time())}"[-20:]
-            _cleanup_pending_trades()
-            _pending_trades[key] = {"ticker": s["ticker"], "direction": direction,
-                                    "entry": p, "sl": sl, "tp1": t1, "tp2": t2, "tp3": t3,
-                                    "ts": time.time()}
-            kb.append([InlineKeyboardButton(
-                f"✅ Войти {s['ticker']} ({direction})",
-                callback_data=f"enter2_{key}"
-            )])
-    markup = InlineKeyboardMarkup(kb) if kb else None
+        p  = s["price"]; sl = sl_tp.get("sl", 0)
+        t1 = sl_tp.get("tp1", 0); t2 = sl_tp.get("tp2", 0); t3 = sl_tp.get("tp3", 0)
+        key = f"{s['ticker']}_{direction}_{int(time.time())}"[-20:]
+        _cleanup_pending_trades()
+        _pending_trades[key] = {
+            "ticker": s["ticker"], "direction": direction,
+            "entry": p, "sl": sl, "tp1": t1, "tp2": t2, "tp3": t3,
+            "ts": time.time()
+        }
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton(f"✅ Войти {s['ticker']} ({direction})", callback_data=f"enter2_{key}")]])
 
-    for chat_id in SCANNER_CHAT_IDS:
-        try:
-            await app.bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=markup)
-        except Exception as e:
-            logger.warning(f"Broadcast failed for {chat_id}: {e}")
+        # 2. Отправляем карточку сигнала
+        for chat_id in SCANNER_CHAT_IDS:
+            try:
+                sent_msg = await app.bot.send_message(chat_id, initial_text, parse_mode="HTML", reply_markup=markup)
+                
+                # 3. Запускаем фоновый ИИ, который через 2 секунды ОТРЕДАКТИРУЕТ это же сообщение!
+                asyncio.create_task(_evaluate_and_edit_signal(app, sent_msg, s, chat_id, tf))
+            except Exception as e:
+                logger.warning(f"Broadcast failed for {chat_id}: {e}")
+            
 
     # Запускаем фоновый ИИ СРАЗУ ПОСЛЕ отправки тех-сигнала
     for s in new_sigs[:5]:
