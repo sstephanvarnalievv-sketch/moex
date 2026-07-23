@@ -1105,26 +1105,23 @@ def format_trade_status(t: dict) -> str:
     return "\n".join(lines)
 
 async def _check_trade(trade_id: str, t: dict, price: float, trades_cache: dict = None) -> str | None:
-    """Проверяет уровни для одной сделки. Обновляет SL. Возвращает alert или None.
-
-    trades_cache: если вызывающий код уже загрузил trades (как
-    monitor_trades_loop делает раз на весь цикл), передать его сюда -
-    избавляет от повторного чтения из Redis на каждую сделку в каждом
-    цикле мониторинга. Если не передан - загружает самостоятельно
-    (сохраняет обратную совместимость с любым другим местом вызова)."""
     trades = trades_cache if trades_cache is not None else load_trades()
     if trade_id not in trades:
         return None
 
+    # ИСПРАВЛЕНИЕ: Защита от дублей — если сделка уже была закрыта, выходим!
+    if t.get("status") == "closed":
+        return None
+
     direction = t["direction"]
-    entry = t["entry"]
-    sl = t["sl"]
-    tp1 = t["tp1"]
-    tp2 = t["tp2"]
-    tp3 = t["tp3"]
-    status = t["status"]
-    is_long = direction == "LONG"
-    changed = False
+    entry     = t["entry"]
+    sl        = t["sl"]
+    tp1       = t["tp1"]
+    tp2       = t["tp2"]
+    tp3       = t["tp3"]
+    status    = t["status"]
+    is_long   = direction == "LONG"
+    changed   = False
 
     if is_long:
         new_high = max(t.get("high_price", entry), price)
@@ -1137,63 +1134,10 @@ async def _check_trade(trade_id: str, t: dict, price: float, trades_cache: dict 
             trades[trade_id]["low_price"] = new_low
             changed = True
 
-    if status == "open":
-        try:
-            opened_dt = datetime.fromisoformat(t["opened_at"])
-            if opened_dt.tzinfo is None:
-                opened_dt = opened_dt.replace(tzinfo=timezone.utc)
-            elapsed_min = (datetime.now(timezone.utc) - opened_dt).total_seconds() / 60
-            max_hold = t.get("max_holding_minutes", 120)
-
-            if elapsed_min >= max_hold:
-                tp1_dist_total = abs(tp1 - entry)
-                if tp1_dist_total > 0:
-                    tp1_progress = (price - entry) / tp1_dist_total if is_long else (entry - price) / tp1_dist_total
-                else:
-                    tp1_progress = 0.0
-
-                pnl_pct = (price - entry) / entry * 100 if is_long else (entry - price) / entry * 100
-
-                days_held = int(elapsed_min // (24 * 60))
-
-                force_close = False
-                close_reason_text = ""
-                _settings = get_bot_settings()
-                loss_threshold = _settings["time_exit_loss_threshold"]
-                tp1_threshold  = _settings["time_exit_tp1_progress"] / 100
-
-                if days_held >= 2:
-                    force_close = True
-                    close_reason_text = f"Удержание {days_held} дн. - принудительное закрытие."
-                elif tp1_progress < tp1_threshold and pnl_pct < loss_threshold:
-                    force_close = True
-                    close_reason_text = f"Прогресс к TP1: {tp1_progress*100:.0f}% | Потери: {pnl_pct:.2f}% - сигнал не отработал."
-
-                if force_close:
-                    closed = close_trade(trade_id, "Time Exit", price)
-                    pnl = closed.get("pnl_pct", 0) if closed else 0
-                    pnl_e = "📈" if pnl >= 0 else "📉"
-                    return (
-                        f"🕐 <b>Тайм-аут - {t['ticker']} {direction}</b>\n"
-                        f"Цена: {price:,.2f} ₽ | Удержание: {elapsed_min:.0f} мин\n"
-                        f"{close_reason_text}\n"
-                        f"{pnl_e} Результат: {pnl:+.2f}%"
-                    )
-                else:
-                    
-                    if abs(elapsed_min - max_hold) < 5:  
-                        pnl_e = "📈" if pnl_pct >= 0 else "📉"
-                        return (
-                            f"⏰ <b>{t['ticker']} {direction} - таймаут, сделка продолжается</b>\n"
-                            f"Цена: {price:,.2f} ₽ {pnl_e} {pnl_pct:+.2f}%\n"
-                            f"Прогресс к TP1: {tp1_progress*100:.0f}%\n"
-                            f"<i>SL на месте ({sl:,.2f} ₽). Ждём следующую сессию.</i>"
-                        )
-        except Exception as te_err:
-            logger.warning(f"Ошибка проверки Time-Exit для {trade_id}: {te_err}")
-
+    # 1. Проверка СТОПА (SL)
     sl_hit = (is_long and price <= sl) or (not is_long and price >= sl)
     if sl_hit:
+        t["status"] = "closed" # Мгновенно помечаем в памяти!
         closed = close_trade(trade_id, "SL", price)
         pnl = closed.get("pnl_pct", 0) if closed else 0
         pnl_e = "📈" if pnl >= 0 else "📉"
@@ -1205,8 +1149,10 @@ async def _check_trade(trade_id: str, t: dict, price: float, trades_cache: dict 
             f"<i>Сделка закрыта.</i>"
         )
 
+    # 2. Проверка ТЕЙКА 3 (TP3)
     tp3_hit = (is_long and price >= tp3) or (not is_long and price <= tp3)
     if tp3_hit and status in ("open", "tp1_hit", "tp2_hit"):
+        t["status"] = "closed" # Мгновенно помечаем в памяти!
         closed = close_trade(trade_id, "TP3", price)
         pnl = closed.get("pnl_pct", 0) if closed else 0
         return (
@@ -1216,12 +1162,16 @@ async def _check_trade(trade_id: str, t: dict, price: float, trades_cache: dict 
             f"<b>Отличная сделка!</b>"
         )
 
+    # 3. Проверка ТЕЙКА 2 (TP2)
     tp2_hit = (is_long and price >= tp2) or (not is_long and price <= tp2)
     if tp2_hit and status == "tp1_hit":
         trades[trade_id]["status"] = "tp2_hit"
+        t["status"] = "tp2_hit"
         if not t.get("sl_moved_to_tp1"):
             trades[trade_id]["sl"] = tp1
+            t["sl"] = tp1
             trades[trade_id]["sl_moved_to_tp1"] = True
+            t["sl_moved_to_tp1"] = True
             changed = True
         save_trades(trades)
         sl_note = f"\n📌 SL перенесён на TP1 ({tp1:,.2f} ₽)" if changed else ""
@@ -1231,12 +1181,16 @@ async def _check_trade(trade_id: str, t: dict, price: float, trades_cache: dict 
             f"Удерживаем позицию, цель TP3: {tp3:,.2f} ₽{sl_note}"
         )
 
+    # 4. Проверка ТЕЙКА 1 (TP1)
     tp1_hit = (is_long and price >= tp1) or (not is_long and price <= tp1)
     if tp1_hit and status == "open":
         trades[trade_id]["status"] = "tp1_hit"
+        t["status"] = "tp1_hit"
         if not t.get("sl_moved_to_be"):
             trades[trade_id]["sl"] = entry
+            t["sl"] = entry
             trades[trade_id]["sl_moved_to_be"] = True
+            t["sl_moved_to_be"] = True
             changed = True
         save_trades(trades)
         sl_note = f"\n📌 SL перенесён в безубыток ({entry:,.2f} ₽)" if changed else ""
@@ -1249,6 +1203,7 @@ async def _check_trade(trade_id: str, t: dict, price: float, trades_cache: dict 
     if changed:
         save_trades(trades)
     return None
+             
 
 async def _force_close_all(app, fetch_price_fn, moex_stocks):
     """EOD закрытие сессии.
