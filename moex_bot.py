@@ -1104,15 +1104,70 @@ def format_trade_status(t: dict) -> str:
         lines.append(f"Закрыта по {t['close_price']:,.2f} ₽  {pnl_e} {pnl:+.2f}%")
     return "\n".join(lines)
 
+async def _get_momentum_exit_advice(ticker: str, figi: str, is_long: bool) -> str:
+    """
+    УМНЫЙ СОВЕТНИК: Анализирует свечи и объём в момент TP1/TP2 и даёт совет:
+    держать дальше или закрывать памп/позицию прямо сейчас.
+    """
+    try:
+        df = await fetch_candles_tinkoff(figi, "CANDLE_INTERVAL_5_MIN", 30)
+        if df is None or len(df) < 15:
+            return "📌 <i>Перенеси SL в безубыток и контролируй позицию.</i>"
+
+        df = calculate_indicators(df, tf="5m")
+        last = df.iloc[-1]
+
+        vol_r  = _safe_vol_ratio(last.get("vol_ratio"), 1.0)
+        rsi    = float(last.get("rsi", 50) or 50)
+        candle = detect_candle_pattern(df)
+
+        warnings = []
+        is_strong = True
+
+        if is_long:
+            if vol_r < 0.8:
+                warnings.append(f"Объём упал (x{vol_r:.1f} - импульс тухнет)")
+                is_strong = False
+            if rsi > 75:
+                warnings.append(f"RSI перекуплен ({rsi:.0f}) - риск отката")
+                is_strong = False
+            if "сверху" in candle or "Медвежье" in candle:
+                warnings.append(f"{candle} - сигнал разворота")
+                is_strong = False
+        else:
+            if vol_r < 0.8:
+                warnings.append(f"Объём упал (x{vol_r:.1f} - импульс тухнет)")
+                is_strong = False
+            if rsi < 25:
+                warnings.append(f"RSI перепродан ({rsi:.0f}) - риск отскока")
+                is_strong = False
+            if "снизу" in candle or "Бычье" in candle:
+                warnings.append(f"{candle} - сигнал разворота")
+                is_strong = False
+
+        if not is_strong and warnings:
+            return (
+                f"⚠️ <b>СОВЕТ: Закрывай позицию или фиксируй 70%!</b>\n"
+                f"<i>Причины: {', '.join(warnings)}</i>"
+            )
+        else:
+            return (
+                f"🚀 <b>СОВЕТ: Импульс сильный, ДЕРЖИ ДАЛЬШЕ!</b>\n"
+                f"<i>Объём x{vol_r:.1f}, RSI {rsi:.0f}. Держим до TP2/TP3.</i>"
+            )
+    except Exception as e:
+        logger.debug(f"momentum_exit_advice error {ticker}: {e}")
+        return "📌 <i>Перенеси SL в безубыток и контролируй позицию.</i>"
+
 async def _check_trade(trade_id: str, t: dict, price: float, trades_cache: dict = None) -> str | None:
     trades = trades_cache if trades_cache is not None else load_trades()
     if trade_id not in trades:
         return None
 
-    # ИСПРАВЛЕНИЕ: Защита от дублей — если сделка уже была закрыта, выходим!
     if t.get("status") == "closed":
         return None
 
+    ticker    = t["ticker"]
     direction = t["direction"]
     entry     = t["entry"]
     sl        = t["sl"]
@@ -1123,81 +1178,78 @@ async def _check_trade(trade_id: str, t: dict, price: float, trades_cache: dict 
     is_long   = direction == "LONG"
     changed   = False
 
-    if is_long:
-        new_high = max(t.get("high_price", entry), price)
-        if new_high != t.get("high_price", entry):
-            trades[trade_id]["high_price"] = new_high
-            changed = True
-    else:
-        new_low = min(t.get("low_price", entry), price)
-        if new_low != t.get("low_price", entry):
-            trades[trade_id]["low_price"] = new_low
-            changed = True
+    figi = MOEX_STOCKS.get(ticker, ("",))[0] or FUTURES.get(ticker, ("",))[0]
 
-    # 1. Проверка СТОПА (SL)
+    # 1. СРАБАТЫВАНИЕ СТОП-ЛОССА (SL)
     sl_hit = (is_long and price <= sl) or (not is_long and price >= sl)
     if sl_hit:
-        t["status"] = "closed" # Мгновенно помечаем в памяти!
+        t["status"] = "closed"
+        trades[trade_id]["status"] = "closed"
         closed = close_trade(trade_id, "SL", price)
         pnl = closed.get("pnl_pct", 0) if closed else 0
         pnl_e = "📈" if pnl >= 0 else "📉"
         sl_type = "безубыток" if t.get("sl_moved_to_be") else ("TP1" if t.get("sl_moved_to_tp1") else "стоп")
         return (
-            f"🛑 <b>SL сработал - {t['ticker']} {direction}</b>\n"
+            f"🛑 <b>SL сработал - {ticker} {direction}</b>\n"
             f"Цена: {price:,.2f} ₽ | SL ({sl_type}): {sl:,.2f} ₽\n"
             f"{pnl_e} Результат: {pnl:+.2f}%\n"
             f"<i>Сделка закрыта.</i>"
         )
 
-    # 2. Проверка ТЕЙКА 3 (TP3)
+    # 2. ТЕЙК 3 (TP3) - ПОЛНОЕ ЗАКРЫТИЕ
     tp3_hit = (is_long and price >= tp3) or (not is_long and price <= tp3)
     if tp3_hit and status in ("open", "tp1_hit", "tp2_hit"):
-        t["status"] = "closed" # Мгновенно помечаем в памяти!
+        t["status"] = "closed"
+        trades[trade_id]["status"] = "closed"
         closed = close_trade(trade_id, "TP3", price)
         pnl = closed.get("pnl_pct", 0) if closed else 0
         return (
-            f"🎯🎯🎯 <b>TP3 достигнут - {t['ticker']}!</b>\n"
+            f"🎯🎯🎯 <b>TP3 достигнут - {ticker}!</b>\n"
             f"Цена: {price:,.2f} ₽ | TP3: {tp3:,.2f} ₽\n"
             f"📈 Результат: +{pnl:.2f}%\n"
-            f"<b>Отличная сделка!</b>"
+            f"<b>Отличная сделка, позиция полностью закрыта!</b>"
         )
 
-    # 3. Проверка ТЕЙКА 2 (TP2)
+    # 3. ТЕЙК 2 (TP2) - СТОП ПЕРЕНОСИТСЯ НА TP1
     tp2_hit = (is_long and price >= tp2) or (not is_long and price <= tp2)
     if tp2_hit and status == "tp1_hit":
         trades[trade_id]["status"] = "tp2_hit"
         t["status"] = "tp2_hit"
         if not t.get("sl_moved_to_tp1"):
             trades[trade_id]["sl"] = tp1
-            t["sl"] = tp1
+            t["sl"] = tp1 # ИСПРАВЛЕНИЕ: Мгновенно обновляем стоп в памяти!
             trades[trade_id]["sl_moved_to_tp1"] = True
             t["sl_moved_to_tp1"] = True
             changed = True
         save_trades(trades)
-        sl_note = f"\n📌 SL перенесён на TP1 ({tp1:,.2f} ₽)" if changed else ""
+        
+        advice = await _get_momentum_exit_advice(ticker, figi, is_long)
         return (
-            f"🎯🎯 <b>TP2 достигнут - {t['ticker']}!</b>\n"
+            f"🎯🎯 <b>TP2 достигнут - {ticker}!</b>\n"
             f"Цена: {price:,.2f} ₽ | TP2: {tp2:,.2f} ₽\n"
-            f"Удерживаем позицию, цель TP3: {tp3:,.2f} ₽{sl_note}"
+            f"📌 SL перенесён на уровень TP1 ({tp1:,.2f} ₽)\n\n"
+            f"{advice}"
         )
 
-    # 4. Проверка ТЕЙКА 1 (TP1)
+    # 4. ТЕЙК 1 (TP1) - СТОП ПЕРЕНОСИТСЯ В БЕЗУБЫТОК (ТОЧКА ВХОДА)
     tp1_hit = (is_long and price >= tp1) or (not is_long and price <= tp1)
     if tp1_hit and status == "open":
         trades[trade_id]["status"] = "tp1_hit"
         t["status"] = "tp1_hit"
         if not t.get("sl_moved_to_be"):
             trades[trade_id]["sl"] = entry
-            t["sl"] = entry
+            t["sl"] = entry # ИСПРАВЛЕНИЕ: Мгновенно обновляем стоп в памяти!
             trades[trade_id]["sl_moved_to_be"] = True
             t["sl_moved_to_be"] = True
             changed = True
         save_trades(trades)
-        sl_note = f"\n📌 SL перенесён в безубыток ({entry:,.2f} ₽)" if changed else ""
+
+        advice = await _get_momentum_exit_advice(ticker, figi, is_long)
         return (
-            f"🎯 <b>TP1 достигнут - {t['ticker']}!</b>\n"
+            f"🎯 <b>TP1 достигнут - {ticker}!</b>\n"
             f"Цена: {price:,.2f} ₽ | TP1: {tp1:,.2f} ₽\n"
-            f"Ждём TP2: {tp2:,.2f} ₽{sl_note}"
+            f"📌 SL перенесён в БЕЗУБЫТОК ({entry:,.2f} ₽)\n\n"
+            f"{advice}"
         )
 
     if changed:
