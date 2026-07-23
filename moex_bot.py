@@ -7342,25 +7342,64 @@ async def _notify_scanner_issue(app, message: str):
         except Exception as e:
             logger.warning(f"_notify_scanner_issue: не удалось отправить в {chat_id}: {e}")
 
-async def _background_ai_evaluation(app, ticker: str, sector: str, 
-                                     news_items: list, tech_signal: str, 
-                                     tech_score: int, price: float,
-                                     sl_tp: dict, tf: str) -> None:
+async def _evaluate_and_edit_signal(app, sent_msg, s: dict, chat_id: int, tf: str) -> None:
     """
-    ЭТАП 2: Фоновая AI оценка сигнала.
-    Запускается СРАЗУ ПОСЛЕ того, как технический сигнал ушел в чат.
+    Фоновый AI-аналитик: собирает 100% новостей (компания, макро, ЦБ, сектор, календарь)
+    и ОБНОВЛЯЕТ (edit_text) сообщение прямо в чате без лишнего спама!
     """
+    ticker      = s["ticker"]
+    sector      = s.get("sector", "")
+    tech_signal = s.get("tech_signal", "")
+    tech_score  = s.get("tech_score", 0)
+    price       = s.get("price", 0)
+    sl_tp       = s.get("sl_tp", {})
+
     try:
-        # Прогоняем через ИИ
+        # 1. Собираем ВСЕ новости (компания, сектор, макро, сырьё)
+        news_items = s.get("news_items", [])
+        if not news_items:
+            n1, n2, n3, n4 = await asyncio.gather(
+                fetch_russian_news(ticker, sector),
+                fetch_commodity_news(sector),
+                fetch_sector_news(sector),
+                fetch_macro_news(),
+                return_exceptions=True
+            )
+            news_items = []
+            for res in (n1, n2, n3, n4):
+                if not isinstance(res, Exception) and res:
+                    news_items.extend(res)
+
+        # 2. Подтягиваем факты Календаря (Заседания ЦБ, дивиденды, отчёты)
+        cal_info = check_calendar_block(ticker)
+        div_info = check_dividend_cutoff(ticker)
+
+        if cal_info.get("warning"):
+            news_items.append({
+                "title": f"ЭКОНОМИЧЕСКИЙ КАЛЕНДАРЬ: {cal_info['warning']}",
+                "is_fact": True, "is_opinion": False, "event": "Календарь событий / ЦБ",
+                "weight": -8 if cal_info.get("block") else -4,
+                "age_min": 5, "effective_weight": -8 if cal_info.get("block") else -4, "source": "calendar"
+            })
+
+        if div_info.get("dividend_info"):
+            news_items.append({
+                "title": f"ДИВИДЕНДЫ: {div_info['dividend_info']}",
+                "is_fact": True, "is_opinion": False, "event": "Дивидендная отсечка",
+                "weight": -9 if div_info.get("block") else 5,
+                "age_min": 5, "effective_weight": -9 if div_info.get("block") else 5, "source": "dividends"
+            })
+
+        # 3. Прогоняем через ИИ со ВСЕМ контекстом рынка
         news_ai = await ai_evaluate_news(
-            news_items or [], ticker, sector, tech_signal, tech_score
+            news_items, ticker, sector, tech_signal, tech_score,
+            price_anomaly=s.get("price_anomaly"), htf_trend=s.get("htf_trend")
         )
-        
+
         filter_status = news_ai.get("filter_status", "CONFIRMED")
         event_type    = news_ai.get("event_type", "")
-        summary       = news_ai.get("summary", "")
 
-        # 1. Регистрируем в базе отслеживания исходов для AI Memory
+        # 4. Регистрируем в базе отслеживания исходов для AI Memory
         has_direction = "LONG" in tech_signal or "SHORT" in tech_signal
         if has_direction and sl_tp:
             signal_id = f"{ticker}_{tf}_{int(time.time())}"
@@ -7382,35 +7421,37 @@ async def _background_ai_evaluation(app, ticker: str, sector: str,
                 "mae_pct":       0.0,
             })
 
-        # 2. Формируем доп. сообщение со статусом от ИИ в чаты
-        fs_emoji = {"CONFIRMED": "✅", "WEAK": "🟡", "BLOCKED": "🚫", "NEWS_ONLY": "📢"}.get(filter_status, "⚪")
-        fs_label = {
-            "CONFIRMED": "CONFIRMED (подтверждён)",
-            "WEAK":      "WEAK (повышенный риск)",
-            "BLOCKED":   "BLOCKED (заблокирован новостями)"
-        }.get(filter_status, filter_status)
+        # 5. Обновляем объект карточки
+        s["news_ai"] = news_ai
+        s["final_signal"] = news_ai.get("confirmed", tech_signal)
 
-        lines = [
-            f"🤖 <b>AI статус сигнала — {esc(ticker)}</b>",
-            f"Статус: {fs_emoji} <b>{fs_label}</b>",
-        ]
-        if summary:
-            lines.append(f"📌 <i>{esc(summary)}</i>")
-        elif news_items:
-            lines.append("📌 <i>Факты компании учтены, противопоказаний нет.</i>")
-        else:
-            lines.append("📌 <i>Новостных рисков нет — чисто технический импульс.</i>")
+        if cal_info.get("block"):
+            s["final_signal"] = f"🚫 {tech_signal} - СТОП (Заседание ЦБ/Событие <30 мин)"
 
-        msg_text = "\n".join(lines)
+        updated_text = format_analysis(s)
 
-        for chat_id in SCANNER_CHAT_IDS:
-            try:
-                await app.bot.send_message(chat_id, msg_text, parse_mode="HTML")
-            except Exception as e:
-                logger.warning(f"AI background msg failed for {chat_id}: {e}")
+        # Пересобираем кнопку входа
+        kb = []
+        direction = "LONG" if "LONG" in tech_signal else "SHORT"
+        if sl_tp and sl_tp.get("sl"):
+            key = f"{ticker}_{direction}_{int(time.time())}"[-20:]
+            _cleanup_pending_trades()
+            _pending_trades[key] = {
+                "ticker": ticker, "direction": direction,
+                "entry": price, "sl": sl_tp.get("sl", 0),
+                "tp1": sl_tp.get("tp1", 0), "tp2": sl_tp.get("tp2", 0), "tp3": sl_tp.get("tp3", 0),
+                "ts": time.time()
+            }
+            kb.append([InlineKeyboardButton(f"✅ Войти {ticker} ({direction})", callback_data=f"enter2_{key}")])
+
+        # 🟢 РЕДАКТИРУЕМ ИСХОДНОЕ СООБЩЕНИЕ ПРЯМО В ЧАТЕ (БЕЗ СПАМА!)
+        await sent_msg.edit_text(
+            updated_text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(kb) if kb else None
+        )
 
     except Exception as e:
-        logger.error(f"_background_ai_evaluation error for {ticker}: {e}", exc_info=True)
+        logger.error(f"_evaluate_and_edit_signal error for {ticker}: {e}", exc_info=True)
 
 
 async def run_scanner_broadcast(app):
