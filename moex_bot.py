@@ -7246,10 +7246,6 @@ async def _notify_scanner_issue(app, message: str):
             logger.warning(f"_notify_scanner_issue: не удалось отправить в {chat_id}: {e}")
 
 async def _evaluate_and_edit_signal(app, sent_msg, s: dict, chat_id: int, tf: str) -> None:
-    """
-    Фоновый AI-аналитик: собирает 100% новостей (компания, макро, ЦБ, сектор, календарь)
-    и ОБНОВЛЯЕТ (edit_text) сообщение прямо в чате без лишнего спама!
-    """
     ticker      = s["ticker"]
     sector      = s.get("sector", "")
     tech_signal = s.get("tech_signal", "")
@@ -7258,7 +7254,7 @@ async def _evaluate_and_edit_signal(app, sent_msg, s: dict, chat_id: int, tf: st
     sl_tp       = s.get("sl_tp", {})
 
     try:
-        # 1. Собираем ВСЕ новости (компания, сектор, макро, сырьё)
+        # Собираем ВСЕ новости для ИИ
         news_items = s.get("news_items", [])
         if not news_items:
             n1, n2, n3, n4 = await asyncio.gather(
@@ -7273,7 +7269,6 @@ async def _evaluate_and_edit_signal(app, sent_msg, s: dict, chat_id: int, tf: st
                 if not isinstance(res, Exception) and res:
                     news_items.extend(res)
 
-        # 2. Подтягиваем факты Календаря (Заседания ЦБ, дивиденды, отчёты)
         cal_info = check_calendar_block(ticker)
         div_info = check_dividend_cutoff(ticker)
 
@@ -7281,19 +7276,17 @@ async def _evaluate_and_edit_signal(app, sent_msg, s: dict, chat_id: int, tf: st
             news_items.append({
                 "title": f"ЭКОНОМИЧЕСКИЙ КАЛЕНДАРЬ: {cal_info['warning']}",
                 "is_fact": True, "is_opinion": False, "event": "Календарь событий / ЦБ",
-                "weight": -8 if cal_info.get("block") else -4,
-                "age_min": 5, "effective_weight": -8 if cal_info.get("block") else -4, "source": "calendar"
+                "weight": -8 if cal_info.get("block") else -4, "age_min": 5, "effective_weight": -4, "source": "calendar"
             })
 
         if div_info.get("dividend_info"):
             news_items.append({
                 "title": f"ДИВИДЕНДЫ: {div_info['dividend_info']}",
-                "is_fact": True, "is_opinion": False, "event": "Дивидендная отсечка",
-                "weight": -9 if div_info.get("block") else 5,
-                "age_min": 5, "effective_weight": -9 if div_info.get("block") else 5, "source": "dividends"
+                "is_fact": True, "is_opinion": False, "event": "Дивиденды",
+                "weight": -9 if div_info.get("block") else 5, "age_min": 5, "effective_weight": 5, "source": "dividends"
             })
 
-        # 3. Прогоняем через ИИ со ВСЕМ контекстом рынка
+        # Прогоняем ИИ по всему контексту
         news_ai = await ai_evaluate_news(
             news_items, ticker, sector, tech_signal, tech_score,
             price_anomaly=s.get("price_anomaly"), htf_trend=s.get("htf_trend")
@@ -7302,38 +7295,30 @@ async def _evaluate_and_edit_signal(app, sent_msg, s: dict, chat_id: int, tf: st
         filter_status = news_ai.get("filter_status", "CONFIRMED")
         event_type    = news_ai.get("event_type", "")
 
-        # 4. Регистрируем в базе отслеживания исходов для AI Memory
+        # Регистрируем результат в базе
         has_direction = "LONG" in tech_signal or "SHORT" in tech_signal
         if has_direction and sl_tp:
             signal_id = f"{ticker}_{tf}_{int(time.time())}"
             _pending_outcomes_add(signal_id, {
-                "ticker":        ticker,
-                "tf":            tf,
-                "direction":     "LONG" if "LONG" in tech_signal else "SHORT",
-                "signal_ts":     datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "entry_price":   price,
-                "sl":            sl_tp.get("sl", 0),
-                "tp1":           sl_tp.get("tp1", 0),
-                "tp2":           sl_tp.get("tp2", 0),
-                "tp3":           sl_tp.get("tp3", 0),
-                "tech_score":    tech_score,
-                "filter_status": filter_status,
-                "event_type":    event_type,
-                "figi":          MOEX_STOCKS.get(ticker, ("",))[0],
-                "mfe_pct":       0.0,
-                "mae_pct":       0.0,
+                "ticker": ticker, "tf": tf,
+                "direction": "LONG" if "LONG" in tech_signal else "SHORT",
+                "signal_ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "entry_price": price, "sl": sl_tp.get("sl", 0), "tp1": sl_tp.get("tp1", 0),
+                "tp2": sl_tp.get("tp2", 0), "tp3": sl_tp.get("tp3", 0),
+                "tech_score": tech_score, "filter_status": filter_status,
+                "event_type": event_type, "figi": MOEX_STOCKS.get(ticker, ("",))[0],
+                "mfe_pct": 0.0, "mae_pct": 0.0,
             })
 
-        # 5. Обновляем объект карточки
         s["news_ai"] = news_ai
         s["final_signal"] = news_ai.get("confirmed", tech_signal)
 
         if cal_info.get("block"):
-            s["final_signal"] = f"🚫 {tech_signal} - СТОП (Заседание ЦБ/Событие <30 мин)"
+            s["final_signal"] = f"🚫 {tech_signal} - СТОП (Событие/ЦБ <30 мин)"
 
-        updated_text = format_analysis(s)
+        # 🟢 ВАЖНО: show_news=False скрывает списки новостей в автоскане!
+        updated_text = format_analysis(s, show_news=False)
 
-        # Пересобираем кнопку входа
         kb = []
         direction = "LONG" if "LONG" in tech_signal else "SHORT"
         if sl_tp and sl_tp.get("sl"):
@@ -7347,7 +7332,7 @@ async def _evaluate_and_edit_signal(app, sent_msg, s: dict, chat_id: int, tf: st
             }
             kb.append([InlineKeyboardButton(f"✅ Войти {ticker} ({direction})", callback_data=f"enter2_{key}")])
 
-        # 🟢 РЕДАКТИРУЕМ ИСХОДНОЕ СООБЩЕНИЕ ПРЯМО В ЧАТЕ (БЕЗ СПАМА!)
+        # Редактируем сообщение в чате
         await sent_msg.edit_text(
             updated_text, parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(kb) if kb else None
