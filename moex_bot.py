@@ -4527,8 +4527,7 @@ async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None
         "mtf_trends": mtf_trends, "daily_poc": daily_poc,
 }
 
-
-def format_analysis(result: dict) -> str:
+def format_analysis(result: dict, show_news: bool = True) -> str:
     if "error" in result:
         return f"❌ {esc(result['error'])}"
 
@@ -4537,7 +4536,7 @@ def format_analysis(result: dict) -> str:
     ts = result["tech_signal"]; tscore = result["tech_score"]; treasons = result["tech_reasons"]
     regime = result["regime"]; imoex = result.get("imoex_regime"); final = result["final_signal"]
     candle = result["candle"]; vol_r = result["vol_ratio"]
-    news = result["news_items"]; time_warn = result.get("time_warning", "")
+    news = result.get("news_items", []); time_warn = result.get("time_warning", "")
 
     bars = "█" * (tscore // 10) + "░" * (10 - tscore // 10)
 
@@ -4621,30 +4620,19 @@ def format_analysis(result: dict) -> str:
     if candle and candle != "Обычная свеча":
         lines.append(f"Свеча: {esc(candle)}")
 
-    lines += ["", "<b>📰 НОВОСТНОЙ БЛОК</b>"]
-    news_ai = result["news_ai"]
-    fs      = news_ai.get("filter_status", "CONFIRMED")
+    # 🤖 КРАТКИЙ БЛОК ИИ (Статус без текста новостей)
+    lines += ["", "<b>🤖 AI ФИЛЬТР</b>"]
+    news_ai = result.get("news_ai", {})
+    fs      = news_ai.get("filter_status", "PENDING")
     ew      = news_ai.get("event_weight", 0)
-    ev      = news_ai.get("event_type", "нет событий")
     summ    = news_ai.get("summary", "")
-    movement_explained = news_ai.get("movement_explained", False)
     fs_emoji = {"CONFIRMED": "✅", "WEAK": "🟡", "WATCH": "👀",
-                "BLOCKED": "🚫", "NEWS_ONLY": "📢"}.get(fs, "⚪")
+                "BLOCKED": "🚫", "NEWS_ONLY": "📢", "PENDING": "⏳"}.get(fs, "⚪")
     ew_sign = f"+{ew}" if ew > 0 else str(ew)
-
-    anomaly = result.get("price_anomaly")
-    if anomaly:
-        urgency_e = "🔴" if anomaly["urgency"] == "высокая" else ("🟡" if anomaly["urgency"] == "средняя" else "🟢")
-        lines.append(f"{urgency_e} <b>Аномалия:</b> {esc(anomaly['description'])}")
 
     lines.append(f"{fs_emoji} <b>{fs}</b>  |  Вес: {ew_sign}/10")
     if summ:
-        explained_tag = " ✔ движение объяснено" if movement_explained else ""
-        lines.append(f"<i>{esc(summ)}{explained_tag}</i>")
-    elif ev and ev != "нет событий":
-        lines.append(f"Событие: {esc(ev)}")
-    elif not anomaly:
-        lines.append("<i>Новостного фона нет - чисто техническое движение</i>")
+        lines.append(f"<i>{esc(summ)}</i>")
 
     lines += ["", f"<b>🎯 СИГНАЛ: {esc(final)}</b>"]
     if time_warn:
@@ -4669,6 +4657,7 @@ def format_analysis(result: dict) -> str:
             dist_to_sl = abs(price - sl_tp.get("sl", price))
             if dist_to_sl > atr:
                 lines.append(f"⚠️ <i>SL широкий: {dist_to_sl/atr:.1f}×ATR</i>")
+
     if sl_tp:
         lines += [
             "", "<b>📐 ЦЕЛИ (ИНТРАДЕЙ)</b>",
@@ -4681,45 +4670,48 @@ def format_analysis(result: dict) -> str:
         if sl_tp.get("warn"):
             lines.append(sl_tp["warn"])
 
-    fact_news       = [it for it in news if it.get("is_fact") and not it.get("is_corporate")]
-    commodity_news  = [it for it in news if it.get("is_commodity")]
-    sector_news_list = [it for it in news if it.get("is_sector_news")]
-    macro_news      = [it for it in news if it.get("is_macro")]
+    # 🟢 ПОКАЗЫВАЕМ СПИСОК НОВОСТЕЙ ТОЛЬКО ЕСЛИ show_news=True (для ручного /analyze)
+    if show_news and news:
+        fact_news       = [it for it in news if it.get("is_fact") and not it.get("is_corporate")]
+        commodity_news  = [it for it in news if it.get("is_commodity")]
+        sector_news_list = [it for it in news if it.get("is_sector_news")]
+        macro_news      = [it for it in news if it.get("is_macro")]
 
-    if fact_news:
-        lines += ["", "📌 <b>RSS факты:</b>"]
-        for it in fact_news[:2]:
-            w   = it.get("weight", 0)
-            w_e = "🟢" if w > 2 else ("🔴" if w < -2 else "⚪")
-            lines.append(f"{w_e} {esc(it['title'][:90])}")
+        if fact_news:
+            lines += ["", "📌 <b>RSS факты:</b>"]
+            for it in fact_news[:2]:
+                w   = it.get("weight", 0)
+                w_e = "🟢" if w > 2 else ("🔴" if w < -2 else "⚪")
+                lines.append(f"{w_e} {esc(it['title'][:90])}")
 
-    if commodity_news:
-        lines += ["", "🌍 <b>Мировой рынок:</b>"]
-        for it in commodity_news[:3]:
-            age = int(it.get("age_min", 0))
-            age_str = f"{age}м" if age < 60 else f"{age//60}ч"
-            lines.append(f"  • {esc(it['title'][:90])}  <i>({age_str})</i>")
+        if commodity_news:
+            lines += ["", "🌍 <b>Мировой рынок:</b>"]
+            for it in commodity_news[:3]:
+                age = int(it.get("age_min", 0))
+                age_str = f"{age}м" if age < 60 else f"{age//60}ч"
+                lines.append(f"  • {esc(it['title'][:90])}  <i>({age_str})</i>")
 
-    if sector_news_list:
-        lines += ["", "🏢 <b>Сектор (регуляторика/рынок):</b>"]
-        for it in sector_news_list[:3]:
-            age = int(it.get("age_min", 0))
-            age_str = f"{age}м" if age < 60 else f"{age//60}ч"
-            lines.append(f"  • {esc(it['title'][:90])}  <i>({age_str})</i>")
+        if sector_news_list:
+            lines += ["", "🏢 <b>Сектор:</b>"]
+            for it in sector_news_list[:3]:
+                age = int(it.get("age_min", 0))
+                age_str = f"{age}м" if age < 60 else f"{age//60}ч"
+                lines.append(f"  • {esc(it['title'][:90])}  <i>({age_str})</i>")
 
-    if macro_news:
-        lines += ["", "🏛 <b>Макро (влияет на весь рынок):</b>"]
-        for it in macro_news[:2]:
-            age = int(it.get("age_min", 0))
-            age_str = f"{age}м" if age < 60 else f"{age//60}ч"
-            lines.append(f"  ⚠️ {esc(it['title'][:90])}  <i>({age_str})</i>")
+        if macro_news:
+            lines += ["", "🏛 <b>Макро:</b>"]
+            for it in macro_news[:2]:
+                age = int(it.get("age_min", 0))
+                age_str = f"{age}м" if age < 60 else f"{age//60}ч"
+                lines.append(f"  ⚠️ {esc(it['title'][:90])}  <i>({age_str})</i>")
 
     lines += [
         "",
         f"<i>⏰ {msk_now().strftime('%d.%m.%Y %H:%M')} МСК</i>",
-        "<i>⚠️ Фьючерсы закрываются в 23:50. Акции в минусе - тоже. Прибыльные позиции могут переноситься.</i>",
+        "<i>⚠️ Фьючерсы закрываются в 23:50. Акции в минусе - тоже.</i>",
     ]
     return "\n".join(lines)
+
 
 _user_state: dict = {}
 
