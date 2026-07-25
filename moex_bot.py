@@ -131,8 +131,6 @@ MOEX_STOCKS = {
               {"московский кредитный банк", "мкб", "mkb"}),
     "MOEX":  ("BBG004S68507", "МосБиржа",              "финансы",
               {"московская биржа", "мосбиржа", "moex exchange"}),
-    "TCSG":  ("BBG00QPYJ5H0", "Т-Банк (TCS)",          "банки",
-              {"т-банк", "тинькофф", "tcs", "tinkoff bank", "t"}),
     "T":     ("BBG00QPYJ5H0", "Т-Банк",                "банки",
               {"т-банк", "тинькофф", "t", "tcs", "tcsg", "tinkoff bank"}),
     "SVCB":  ("BBG00F9XX7H4", "Совкомбанк",            "банки",
@@ -192,8 +190,6 @@ MOEX_STOCKS = {
               {"лента", "lenta"}),
     "MDMG":  ("BBG001M2SC01", "MD Medical",            "медицина",
               {"мать и дитя", "md medical", "mdmg"}),
-    "FIXP":  ("BBG00ZHCX1X2", "Fix Price",             "ритейл",
-              {"fix price", "фикс прайс"}),
     "FIXR":  ("BBG00ZHCX1X2", "Fix Price",             "ритейл",
               {"fix price", "фикс прайс", "fixr"}),
     
@@ -241,6 +237,8 @@ MOEX_STOCKS = {
               {"сфи", "эсэфай", "sfin"}),
     "MFGS":  ("BBG004S68BR5", "Мегафон",               "телеком",
               {"мегафон", "megafon"}),
+    "RARG":  ("BBG007N0Z367", "РусАгро",               "сельхоз",
+              {"РусАгро, "Rusagro"}),
 }
 
 FUTURES = {
