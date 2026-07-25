@@ -3350,125 +3350,95 @@ async def ai_evaluate_news(news_items: list[dict], ticker: str, sector: str,
                            edisclosure_items: list = None,
                            htf_trend: dict = None) -> dict:
     """
-    Новая логика: AI объясняет связь между движением цены и найденными фактами.
-    Не "оцени новость" а "есть ли объяснение этому движению".
-
-    Приоритет источников:
-    1. e-disclosure (самые свежие корпоративные факты)
-    2. RSS keyword-факты (если e-disclosure пустой)
-    3. Если нет ни того ни другого - "чисто техническое движение"
+    СТРОГАЯ AI ОЦЕНКА: ИИ отдает JSON с числовым параметром confidence (0-100%).
+    Если уверенность < 70% — новость отбрасывается как косвенная/галлюцинация.
     """
     if not get_ai_enabled():
         return {"summary": "", "ai_label": "", "ai_weight": 0}
+
+    ticker = normalize_ticker(ticker)
     is_long  = "LONG" in tech_signal
     is_short = "SHORT" in tech_signal or "ВЫХОД" in tech_signal
     has_signal = is_long or is_short
 
     all_facts = []
     if edisclosure_items:
-        all_facts.extend([it for it in edisclosure_items
-                         if it.get("age_min", 999) <= NEWS_MAX_AGE_MINUTES])
+        all_facts.extend([it for it in edisclosure_items if it.get("age_min", 999) <= NEWS_MAX_AGE_MINUTES])
     rss_facts = [it for it in (news_items or [])
-                 if it.get("is_fact") and not it.get("is_opinion")
-                 and it.get("age_min", 999) <= NEWS_MAX_AGE_MINUTES]
+                 if it.get("is_fact") and not it.get("is_opinion") and it.get("age_min", 999) <= NEWS_MAX_AGE_MINUTES]
     all_facts.extend(rss_facts)
-    # Сортируем строго по важности (абсолютному весу) перед срезом [:5]
-    all_facts.sort(
-        key=lambda x: (-abs(x.get("effective_weight", x.get("weight", 0))), x.get("age_min", 999))
-    )
+
+    all_facts.sort(key=lambda x: (-abs(x.get("effective_weight", x.get("weight", 0))), x.get("age_min", 999)))
     fact_weight, fact_events = _score_facts(all_facts)
 
-    blocking_found = [it["event"] for it in all_facts
-                      if it.get("effective_weight", it.get("weight", 0)) <= -8]
-
-    event_type  = fact_events[0].split(" (")[0] if fact_events else "нет событий"
-    # ИСПРАВЛЕНИЕ: Автоматически применяем множитель точности из памяти ИИ!
+    event_type = fact_events[0].split(" (")[0] if fact_events else "нет событий"
     multiplier = get_ai_category_multiplier(event_type)
     fact_weight = int(round(fact_weight * multiplier))
+
     event_weight = fact_weight
-    llm_summary  = ""
+    llm_summary = ""
     movement_explained = False
+    confidence = 100
     ai_skip_reason = ""
 
     _settings = get_bot_settings()
     ai_trigger_threshold = _settings["fact_weight_ai_trigger"]
-    should_call_ai = (
-        gemini_model and all_facts and (
-            price_anomaly is not None or
-            bool(edisclosure_items) or
-            abs(fact_weight) >= ai_trigger_threshold
-        )
+    should_call_ai = (gemini_model or groq_client) and (
+        all_facts and (price_anomaly is not None or bool(edisclosure_items) or abs(fact_weight) >= ai_trigger_threshold)
     )
 
-    if not should_call_ai:
-        if not gemini_model:
-            ai_skip_reason = "no_gemini_client"
-        elif not all_facts:
-            ai_skip_reason = "no_facts"
-        else:
-            ai_skip_reason = (f"weak_signal(fact_weight={fact_weight}, "
-                              f"threshold={ai_trigger_threshold}, no_anomaly, no_edisclosure)")
-
     if should_call_ai:
-        company_name = MOEX_STOCKS.get(ticker.upper(), ("", ticker, ""))[1]
-
-        movement_ctx = ""
-        if price_anomaly:
-            movement_ctx = (
-                f"\nЦЕНОВОЕ ДВИЖЕНИЕ: {price_anomaly['description']} "
-                f"(объём x{price_anomaly['vol_ratio']} от нормы, срочность: {price_anomaly['urgency']})"
-            )
-
+        company_name = MOEX_STOCKS.get(ticker, ("", ticker, ""))[1]
         facts_text = "\n".join(
             f"- [{it.get('source','rss')}, {it.get('age_min',0):.0f}мин назад] {it['title']}"
             for it in all_facts[:5]
         )
 
-        prompt = f"""Ты - квалифицированный аналитик российского фондового рынка.
+        prompt = f"""Ты - строгий финансовый аналитик МосБиржи (MOEX).
 
-Компания: {company_name} ({ticker}), сектор: {sector}{movement_ctx}
+Компания: {company_name} ({ticker}), профильный сектор: {sector}
 
-Свежие факты по компании:
+Свежие новости:
 {facts_text}
 
-Ответь на три вопроса строго в формате JSON:
-1. Объясняют ли эти факты ценовое движение?
-2. Насколько сильное влияние на цену (вес от -10 до +10)?
-3. Одно предложение объяснения для трейдера (без рекомендаций купить/продать).
+Задание:
+Оцени ПРЯМОЕ влияние новостей именно на компанию {company_name} ({ticker}).
+Определи показатель confidence (0-100%): насколько новости напрямую связаны с компанией/сектором, а не являются косвенным шумом.
 
-Формат ответа:
-{{"explains_movement": true/false, "weight": число, "summary": "одно предложение"}}"""
+Ответь СТРОГО в формате JSON:
+{{
+  "confidence": число от 0 до 100,
+  "weight": число от -10 до 10,
+  "explains_movement": true/false,
+  "summary": "одно короткое предложение"
+}}"""
 
-        loop = asyncio.get_event_loop()
-        await _ai_rate_limiter.acquire()
-        raw  = await loop.run_in_executor(
-            None, lambda: _gemini_call(prompt)
-        )
-        if not raw:
-            ai_skip_reason = "empty_response(gemini_and_groq_both_failed)"
-        else:
-            try:
-                m   = re.search(r'\{.*\}', raw, re.DOTALL)
-                obj = json.loads(m.group(0)) if m else {}
+        try:
+            loop = asyncio.get_event_loop()
+            await _ai_rate_limiter.acquire()
+            raw = await loop.run_in_executor(None, lambda: _gemini_call(prompt))
+            
+            m = re.search(r'\{.*\}', raw, re.DOTALL)
+            if m:
+                obj = json.loads(m.group(0))
+                confidence = int(obj.get("confidence", 50))
+                llm_w = int(obj.get("weight", fact_weight))
+                llm_summary = str(obj.get("summary", ""))
                 movement_explained = bool(obj.get("explains_movement", False))
-                llm_w        = int(obj.get("weight", fact_weight))
-                event_weight = max(-10, min(10, (fact_weight + llm_w) // 2))
-                llm_summary  = obj.get("summary", "")
-                if not llm_summary:
-                    ai_skip_reason = "parsed_but_no_summary_field"
-            except Exception as parse_err:
-                ai_skip_reason = f"json_parse_failed({str(parse_err)[:50]})"
+
+                # 🎯 ФИЛЬТР ГАЛЛЮЦИНАЦИЙ: Если уверенность < 70% — зануляем вес новости!
+                if confidence < 70:
+                    event_weight = 0
+                    llm_summary = f"Косвенный новостной фон (уверенность ИИ {confidence}%)"
+                else:
+                    event_weight = max(-10, min(10, (fact_weight + llm_w) // 2))
+        except Exception as parse_err:
+            ai_skip_reason = f"ai_parse_error({parse_err})"
 
     final_weight = event_weight
-
-    htf_direction = (htf_trend or {}).get("trend", "")
-    is_htf_contrarian = (
-        (is_long and htf_direction == "bear") or
-        (is_short and htf_direction == "bull")
-    )
-
     min_score_required = get_bot_settings()["min_tech_score_confirmed"]
     is_tech_too_weak = tech_score < min_score_required
+    blocking_found = [it["event"] for it in all_facts if it.get("effective_weight", it.get("weight", 0)) <= -8]
 
     if blocking_found and is_long:
         filter_status = "BLOCKED"
@@ -3477,48 +3447,26 @@ async def ai_evaluate_news(news_items: list[dict], ticker: str, sector: str,
     elif not has_signal:
         filter_status = "NO_SIGNAL"
     elif final_weight >= 3:
-        filter_status = "WEAK" if (is_htf_contrarian or is_tech_too_weak) else "CONFIRMED"
+        filter_status = "WEAK" if is_tech_too_weak else "CONFIRMED"
     elif final_weight >= -2:
-        filter_status = "WEAK" if (is_htf_contrarian or is_tech_too_weak) else "CONFIRMED"
-    elif final_weight >= -5:
-        filter_status = "WEAK"
+        filter_status = "WEAK" if is_tech_too_weak else "CONFIRMED"
     else:
         filter_status = "BLOCKED"
 
-    if tech_signal == "🟩 LONG":
-        status_map = {
-            "CONFIRMED": "🟩 LONG CONFIRMED", "WEAK":     "🟡 LONG WEAK",
-            "WATCH":     "👀 LONG WATCH",      "BLOCKED":  "🚫 LONG BLOCKED",
-            "NO_SIGNAL": "🟩 LONG",            "NEWS_ONLY":"🟩 LONG (сильный фон)",
-        }
-    elif is_short:
-        status_map = {
-            "CONFIRMED": "🟥 ВЫХОД CONFIRMED", "WEAK":     "🟡 ВЫХОД WEAK",
-            "WATCH":     "👀 ВЫХОД WATCH",      "BLOCKED":  "🟥 ВЫХОД (сдерживающий позитив)",
-            "NO_SIGNAL": "🟥 ВЫХОД",            "NEWS_ONLY":"🟥 ВЫХОД",
-        }
-    else:
-        status_map = {k: "НЕТ СИГНАЛА" for k in
-                      ["CONFIRMED", "WEAK", "WATCH", "BLOCKED", "NO_SIGNAL", "NEWS_ONLY"]}
-
+    status_map = {
+        "CONFIRMED": "🟩 LONG CONFIRMED" if is_long else "🟥 ВЫХОД CONFIRMED",
+        "WEAK":      "🟡 LONG WEAK" if is_long else "🟡 ВЫХОД WEAK",
+        "BLOCKED":   "🚫 BLOCKED",
+        "NO_SIGNAL": tech_signal,
+    }
     confirmed = status_map.get(filter_status, tech_signal)
 
     return {
-        "event_type":          event_type,
-        "event_weight":        final_weight,
-        "fact_events":         fact_events[:3],
-        "filter_status":       filter_status,
-        "summary":             llm_summary,
-        "blocking":            blocking_found,
-        "movement_explained":  movement_explained,
-        "confirmed":           confirmed,
-        "opinions_skipped":    len([it for it in (news_items or []) if it.get("is_opinion")]),
-        "sentiment":           "позитив" if final_weight > 2 else ("негатив" if final_weight < -2 else "нейтрально"),
-        "score":               min(10, max(0, abs(final_weight))),
-        "has_edisclosure":     bool(edisclosure_items),
-        "edisclosure_count":   len(edisclosure_items or []),
-        "ai_skip_reason":      ai_skip_reason,
-    }
+        "event_type": event_type, "event_weight": final_weight,
+        "filter_status": filter_status, "summary": llm_summary,
+        "confidence": confidence, "confirmed": confirmed,
+        "movement_explained": movement_explained, "ai_skip_reason": ai_skip_reason,
+}
 
 async def ai_classify_news_impact(headline: str, ticker: str) -> dict:
     if not get_ai_enabled():
