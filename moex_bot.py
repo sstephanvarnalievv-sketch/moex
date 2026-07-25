@@ -250,7 +250,8 @@ CANONICAL_ALIASES = {
     "CNRU":   "CIAN",
     "OZONRU": "OZON",
     "YDEXRU": "YDEX",
-    "AGRORU": "AGRO",
+    "AGRO":   "RAGR",  # Старый тикер ГДР Русагро
+    "RARG":   "RAGR",  # Защита от опечатки
 }
 
 def normalize_ticker(ticker: str) -> str:
@@ -4846,7 +4847,8 @@ async def update_figi_data() -> tuple:
             "T":     ["T", "TCSG", "TCS"],
             "X5":    ["X5", "FIVE"],
             "FIXR":  ["FIXR", "FIXP", "FIXRU"],
-        }
+            "RAGR":  ["RAGR", "AGRO", "RARG"], # <-- Добавлено для Русагро
+}
 
         for ticker in list(MOEX_STOCKS.keys()):
             
