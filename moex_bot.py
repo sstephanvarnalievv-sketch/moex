@@ -241,6 +241,23 @@ MOEX_STOCKS = {
               {"РусАгро", "Rusagro"}),
 }
 
+CANONICAL_ALIASES = {
+    "TCSG":   "T",
+    "TCS":    "T",
+    "FIXR":   "FIXP",
+    "FIXRU":  "FIXP",
+    "VKRU":   "VKCO",
+    "CNRU":   "CIAN",
+    "OZONRU": "OZON",
+    "YDEXRU": "YDEX",
+    "AGRORU": "AGRO",
+}
+
+def normalize_ticker(ticker: str) -> str:
+    """Приводит тикеры-алиасы (TCSG, FIXR) к единому коду (T, FIXP)."""
+    t = (ticker or "").upper().strip()
+    return CANONICAL_ALIASES.get(t, t)
+
 FUTURES = {
     "SiU6":  ("FUTSI0926000", "Доллар/Рубль (Si)",    "валюта",   1.0,    1000),  
     "EuU6":  ("FUTEU0926000", "Евро/Рубль (Eu)",      "валюта",   1.0,    1000),
