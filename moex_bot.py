@@ -4145,6 +4145,28 @@ def calculate_sl_tp_stocks(signal: str, price: float, atr: float,
         "warn":      " | ".join(warnings),
     }
 
+def calculate_volume_percentile(df_closed: pd.DataFrame, df_daily: pd.DataFrame = None) -> int:
+    """
+    Вычисляет относительный перцентиль объема (0-100%).
+    Показывает, на сколько % текущий объем выше/ниже объемов за последние 30 дней.
+    """
+    try:
+        if df_daily is not None and len(df_daily) >= 15:
+            hist_vols = df_daily["volume"].dropna().values
+            cur_vol   = float(df_closed["volume"].iloc[-1]) * 4  # экстраполяция интрадея
+            percentile = (hist_vols < cur_vol).mean() * 100
+            return int(round(percentile))
+        
+        # Fallback по интрадей-свечам
+        if len(df_closed) >= 20:
+            hist_vols = df_closed["volume"].dropna().tail(100).values
+            cur_vol   = float(df_closed["volume"].iloc[-1])
+            percentile = (hist_vols < cur_vol).mean() * 100
+            return int(round(percentile))
+    except Exception as e:
+        logger.debug(f"Volume percentile error: {e}")
+    return 50 # Нейтральный перцентиль по умолчанию
+
 def compute_tech_score(df: pd.DataFrame, mode_cfg: dict,
                        imoex_regime: dict = None,
                        htf_trend: dict = None, pd_levels: dict = None,
@@ -4211,7 +4233,67 @@ def compute_tech_score(df: pd.DataFrame, mode_cfg: dict,
             score += 25
             short_r.append("🔥 " + macd_div)
 
-    # 2. ПОДKРУТКА: Штраф за поздний вход в свечу (>80% пройдено)
+def compute_tech_score(df: pd.DataFrame, mode_cfg: dict,
+                       imoex_regime: dict = None,
+                       htf_trend: dict = None, pd_levels: dict = None,
+                       macd_div: str = "", df_daily: pd.DataFrame = None) -> tuple[str, int, list, dict]:
+    """
+    ГЕЙТОВАЯ СИСТЕМА MOEX:
+    Вычисляет 4 независимых Суб-скора. Сигнал выдается ТОЛЬКО если ВСЕ 4 Гейта возвращают PASS.
+    """
+    row = df.iloc[-1]
+    rsi = float(row.get("rsi", 50) or 50)
+    macd_h = float(row.get("macd_hist", 0) or 0)
+    close = float(row["close"])
+    vol_r = _safe_vol_ratio(row.get("vol_ratio"))
+    regime = detect_market_regime(df)
+    candle = detect_candle_pattern(df)
+
+    vwap     = float(row.get("vwap",     0) or 0)
+    vwap_dev = float(row.get("vwap_dev", 0) or 0)
+    ema9     = float(row.get("ema9",     0) or 0)
+    ema20    = float(row.get("ema20",    0) or 0)
+    has_vwap = vwap > 0
+
+    # Определяем направление
+    long_gates, short_gates = 0, 0
+    reasons = []
+
+    if has_vwap:
+        if close > vwap * 1.002:
+            long_gates += 1; reasons.append(f"Выше VWAP (+{vwap_dev:.2f}%)")
+        elif close < vwap * 0.998:
+            short_gates += 1; reasons.append(f"Ниже VWAP ({vwap_dev:.2f}%)")
+
+    if ema9 > 0 and ema20 > 0:
+        if close > ema9 > ema20:
+            long_gates += 1; reasons.append("EMA9 > EMA20")
+        elif close < ema9 < ema20:
+            short_gates += 1; reasons.append("EMA9 < EMA20")
+
+    if long_gates > short_gates:
+        direction = "long"
+    elif short_gates > long_gates:
+        direction = "short"
+    else:
+        return "НЕТ СИГНАЛА", 0, ["Нет чёткого трендового направления"], {}
+
+    # 🚪 GATE 1: TREND SCORE (0-100)
+    trend_score = 50
+    if direction == "long" and close > vwap: trend_score += 15
+    if direction == "short" and close < vwap: trend_score += 15
+    if macd_div and ("Бычья" in macd_div if direction == "long" else "Медвежья" in macd_div):
+        trend_score += 25; reasons.append("🔥 " + macd_div)
+    if htf_trend and htf_trend.get("trend") == ("bull" if direction == "long" else "bear"):
+        trend_score += 15
+
+    # 🚪 GATE 2: VOLUME SCORE (Volume Percentile 0-100%)
+    vol_percentile = calculate_volume_percentile(df, df_daily)
+    volume_score   = vol_percentile
+    reasons.append(f"Объём: {vol_percentile}-й перцентиль за 30d (x{vol_r:.1f})")
+
+    # 🚪 GATE 3: EXECUTION SCORE (Качество свечи и входа 0-100)
+    exec_score = 75
     try:
         last_high = float(df["high"].iloc[-1])
         last_low  = float(df["low"].iloc[-1])
@@ -4219,38 +4301,30 @@ def compute_tech_score(df: pd.DataFrame, mode_cfg: dict,
         if c_rng > 0:
             c_prog = (close - last_low) / c_rng * 100 if direction == "long" else (last_high - close) / c_rng * 100
             if c_prog >= 80:
-                score -= 15
-                (long_r if direction == "long" else short_r).append(f"⚠️ Поздний вход (свеча {c_prog:.0f}%)")
+                exec_score -= 25
+                reasons.append(f"⚠️ Свеча пройдена на {c_prog:.0f}%")
     except Exception:
         pass
 
-    # 3. ПОДKРУТКА: Строгий фильтр LONG при медвежьем IMOEX
-    min_score = mode_cfg.get("min_score", 70)
-    if imoex_regime:
-        ir = imoex_regime.get("regime", "neutral")
-        if ir == "bear" and direction == "long":
-            score -= 10
-            min_score += 10  # Требуем минимум 80 баллов для LONG на падающем рынке!
-            long_r.append("⚠️ Рынку тяжело (IMOEX bear)")
+    # ПРОВЕРКА ПРОХОЖДЕНИЯ ШЛЮЗОВ (GATES PASS/FAIL)
+    min_trend = mode_cfg.get("min_score", 65)
+    gate_trend_pass  = trend_score >= min_trend
+    gate_volume_pass = volume_score >= 50  # Объем выше медианы
+    gate_exec_pass   = exec_score >= 50
 
-    if has_vwap:
-        dev = abs(vwap_dev)
-        if dev > 1.0:   score += 15
-        elif dev > 0.5: score += 8
+    gates_summary = {
+        "trend_score": trend_score, "gate_trend": gate_trend_pass,
+        "vol_percentile": vol_percentile, "gate_vol": gate_volume_pass,
+        "exec_score": exec_score, "gate_exec": gate_exec_pass,
+    }
 
-    if vol_r > 2.5:   score += 15
-    elif vol_r > 1.5: score += 8
-
-    score = min(100, max(0, score))
-
-    if direction == "long":
-        signal = "🟩 LONG" if score >= min_score else "НЕТ СИГНАЛА"
-        reasons = long_r
+    if gate_trend_pass and gate_volume_pass and gate_exec_pass:
+        signal = "🟩 LONG" if direction == "long" else "🟥 SHORT/ВЫХОД"
     else:
-        signal = "🟥 SHORT/ВЫХОД" if score >= min_score else "НЕТ СИГНАЛА"
-        reasons = short_r
+        signal = "НЕТ СИГНАЛА"
 
-    return signal, score, reasons
+    total_score = int(round((trend_score + volume_score + exec_score) / 3))
+    return signal, total_score, reasons, gates_summary
     
 
 def calculate_daily_poc(df_daily) -> float | None:
