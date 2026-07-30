@@ -4334,11 +4334,14 @@ def compute_tech_score(df: pd.DataFrame, mode_cfg: dict,
     except Exception:
         pass
 
-    # ПРОВЕРКА ПРОХОЖДЕНИЯ ШЛЮЗОВ (ГЕЙТЫ ПО ПРОФИЛЮ АКЦИИ)
+    # ПРОВЕРКА ПРОХОЖДЕНИЯ ШЛЮЗОВ (ГЕЙТЫ ПО ПРОФИЛЮ АКЦИИ С УЧЕТОМ УТРА)
+    now_hour = msk_now().hour
+    is_morning = 7 <= now_hour < 10
+
     profile = get_instrument_profile(df.attrs.get("ticker", ""))
-    
     min_trend = profile["min_trend"]
-    min_vol_p = profile["min_vol_percentile"]
+    # Утром понижаем порог объема на 15%, так как рынок только просыпается
+    min_vol_p = max(35, profile["min_vol_percentile"] - (15 if is_morning else 0))
 
     gate_trend_pass  = trend_score >= min_trend
     gate_volume_pass = vol_percentile >= min_vol_p
