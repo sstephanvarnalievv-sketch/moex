@@ -4403,6 +4403,64 @@ def calculate_daily_poc(df_daily) -> float | None:
     except Exception:
         return None
 
+# === СЫРЬЕВЫЕ ПОВОДЫРИ ДЛЯ АКЦИЙ MOEX ===
+COMMODITY_DRIVERS = {
+    "PLZL":  ("GDU6", "Золото (Gold)"),
+    "POLY":  ("GDU6", "Золото (Gold)"),
+    "LKOH":  ("BRU6", "Нефть Brent"),
+    "ROSN":  ("BRU6", "Нефть Brent"),
+    "TATN":  ("BRU6", "Нефть Brent"),
+    "TATNP": ("BRU6", "Нефть Brent"),
+    "NVTK":  ("NGU6", "Природный газ"),
+    "GAZP":  ("NGU6", "Природный газ"),
+    "SBER":  ("SiU6", "Доллар/Рубль"),
+    "SBERP": ("SiU6", "Доллар/Рубль"),
+    "SNGS":  ("SiU6", "Доллар/Рубль"),
+    "SNGSP": ("SiU6", "Доллар/Рубль"),
+}
+
+async def check_commodity_driver_alignment(ticker: str, tech_signal: str) -> tuple[bool, str]:
+    """
+    Проверяет тренд сырьевого поводыря (Нефть, Золото, Газ, Валюта) за последний час.
+    Возвращает (is_conflict: bool, warning_msg: str).
+    """
+    tk = normalize_ticker(ticker)
+    if tk not in COMMODITY_DRIVERS:
+        return False, ""
+
+    driver_code, driver_name = COMMODITY_DRIVERS[tk]
+    info = FUTURES.get(driver_code)
+    if not info:
+        return False, ""
+
+    figi = info[0]
+    if not figi or (figi.startswith("FUT") and len(figi) <= 15):
+        return False, ""
+
+    try:
+        df_driver = await fetch_candles_tinkoff(figi, "CANDLE_INTERVAL_15_MIN", 20)
+        if df_driver is None or len(df_driver) < 5:
+            return False, ""
+
+        # Динамика поводыря за 5 свечей 15m (~1 час)
+        close_now  = float(df_driver["close"].iloc[-1])
+        close_past = float(df_driver["close"].iloc[-5])
+        driver_move_pct = (close_now - close_past) / close_past * 100
+
+        is_long  = "LONG" in tech_signal
+        is_short = "SHORT" in tech_signal or "ВЫХОД" in tech_signal
+
+        if is_long and driver_move_pct < -0.4:
+            return True, f"Сырьевой поводырь <b>{driver_name} ({driver_code})</b> падает ({driver_move_pct:+.1f}%)"
+
+        if is_short and driver_move_pct > 0.4:
+            return True, f"Сырьевой поводырь <b>{driver_name} ({driver_code})</b> растет ({driver_move_pct:+.1f}%)"
+
+    except Exception as e:
+        logger.debug(f"Commodity driver error {ticker}: {e}")
+
+    return False, ""
+
 async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None, run_ai: bool = True) -> dict | None:
     if mode_cfg is None:
         mode_cfg = TRADE_MODES["mid"]
@@ -4537,6 +4595,16 @@ async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None
     cal_check = check_calendar_block(ticker)
     div_check = check_dividend_cutoff(ticker)
     sector_check = check_signal_against_sector_modifier(sector, final_signal)
+    try:
+        driver_conflict, driver_warn = await check_commodity_driver_alignment(ticker, final_signal)
+    except Exception as drv_err:
+        driver_conflict, driver_warn = False, ""
+
+    if driver_conflict:
+        if "CONFIRMED" in final_signal:
+            final_signal = final_signal.replace("CONFIRMED", "WEAK ⚠️ (сырьё)")
+        elif "LONG" in final_signal or "SHORT" in final_signal:
+            tech_score = max(0, tech_score - 15)
     sl_tp = calculate_sl_tp_stocks(tech_signal, price, atr, supports, resistances, pd_levels=pd_levels)
 
     # 🟢 ВОССТАНОВЛЕН РАСЧЕТ ПРОГРЕССА СВЕЧИ
@@ -4597,12 +4665,13 @@ async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None
         "sl_tp": sl_tp, "supports": supports, "resistances": resistances, "candle": detect_candle_pattern(df_closed),
         "vol_ratio": round(_safe_vol_ratio(df_closed["vol_ratio"].iloc[-1]), 2), "time_warning": session.get("warning", ""),
         "calendar": cal_check, "dividend": div_check, "sector_modifier": sector_check,
+        "driver_warn": driver_warn, # <-- ДОБАВЛЕНО
         "liquidity_tier": liquidity_tier, "liquidity_warn": liquidity_warn,
         "candle_progress_pct": round(candle_progress_pct, 1), "candle_progress_note": candle_progress_note,
         "daily_atr_progress_pct": round(daily_atr_progress_pct, 1), "daily_atr_progress_note": daily_atr_progress_note,
         "price_anomaly": price_anomaly, "edisclosure_items": edisclosure_items[:3],
         "mtf_trends": mtf_trends, "daily_poc": daily_poc,
-}
+    }
 
 def format_analysis(result: dict, show_news: bool = True) -> str:
     if "error" in result:
@@ -4646,6 +4715,9 @@ def format_analysis(result: dict, show_news: bool = True) -> str:
         lines.append(f"{div_e} <b>ДИВИДЕНДЫ:</b> {esc(div_info['dividend_info'])}")
 
     sec_mod = result.get("sector_modifier", {})
+    drv_warn = result.get("driver_warn", "")
+    if drv_warn:
+        lines.append(f"🛢 <b>ПОВОДЫРЬ:</b> {drv_warn}")
     if sec_mod.get("warning_ru"):
         lines.append(f"🌍 <b>СЕКТОР:</b> {esc(sec_mod['warning_ru'])}")
 
