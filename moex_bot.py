@@ -4167,6 +4167,34 @@ def calculate_volume_percentile(df_closed: pd.DataFrame, df_daily: pd.DataFrame 
         logger.debug(f"Volume percentile error: {e}")
     return 50 # Нейтральный перцентиль по умолчанию
 
+# === ПРОФИЛИ АКЦИЙ MOEX (Tier 1, Tier 2, Tier 3) ===
+INSTRUMENT_PROFILES: dict[str, dict] = {
+    # TIER 1: Голубые фишки (Строгие требования к тренду, умеренный порог объема)
+    "SBER":  {"tier": 1, "min_trend": 65, "min_vol_percentile": 50, "news_weight": 1.0},
+    "SBERP": {"tier": 1, "min_trend": 65, "min_vol_percentile": 50, "news_weight": 1.0},
+    "GAZP":  {"tier": 1, "min_trend": 65, "min_vol_percentile": 50, "news_weight": 1.2},
+    "LKOH":  {"tier": 1, "min_trend": 65, "min_vol_percentile": 50, "news_weight": 1.0},
+    "ROSN":  {"tier": 1, "min_trend": 65, "min_vol_percentile": 50, "news_weight": 1.0},
+    "NVTK":  {"tier": 1, "min_trend": 65, "min_vol_percentile": 50, "news_weight": 1.1},
+    "YDEX":  {"tier": 1, "min_trend": 65, "min_vol_percentile": 50, "news_weight": 1.0},
+    "T":     {"tier": 1, "min_trend": 65, "min_vol_percentile": 50, "news_weight": 1.0},
+    "GMKN":  {"tier": 1, "min_trend": 65, "min_vol_percentile": 50, "news_weight": 1.1},
+    "PLZL":  {"tier": 1, "min_trend": 65, "min_vol_percentile": 50, "news_weight": 1.2},
+}
+
+DEFAULT_TIER2_PROFILE = {"tier": 2, "min_trend": 60, "min_vol_percentile": 65, "news_weight": 1.0}
+DEFAULT_TIER3_PROFILE = {"tier": 3, "min_trend": 55, "min_vol_percentile": 75, "news_weight": 0.8}
+
+def get_instrument_profile(ticker: str) -> dict:
+    """Возвращает правила и пороги для конкретной акции на основе её эшелона (Tier)."""
+    tk = normalize_ticker(ticker)
+    if tk in INSTRUMENT_PROFILES:
+        return INSTRUMENT_PROFILES[tk]
+    elif tk in LIQUID_TICKERS:
+        return DEFAULT_TIER2_PROFILE
+    else:
+        return DEFAULT_TIER3_PROFILE
+
 def compute_tech_score(df: pd.DataFrame, mode_cfg: dict,
                        imoex_regime: dict = None,
                        htf_trend: dict = None, pd_levels: dict = None,
@@ -4306,13 +4334,18 @@ def compute_tech_score(df: pd.DataFrame, mode_cfg: dict,
     except Exception:
         pass
 
-    # ПРОВЕРКА ПРОХОЖДЕНИЯ ШЛЮЗОВ (GATES PASS/FAIL)
-    min_trend = mode_cfg.get("min_score", 65)
+    # ПРОВЕРКА ПРОХОЖДЕНИЯ ШЛЮЗОВ (ГЕЙТЫ ПО ПРОФИЛЮ АКЦИИ)
+    profile = get_instrument_profile(df.attrs.get("ticker", ""))
+    
+    min_trend = profile["min_trend"]
+    min_vol_p = profile["min_vol_percentile"]
+
     gate_trend_pass  = trend_score >= min_trend
-    gate_volume_pass = volume_score >= 50  # Объем выше медианы
+    gate_volume_pass = vol_percentile >= min_vol_p
     gate_exec_pass   = exec_score >= 50
 
     gates_summary = {
+        "tier": profile["tier"],
         "trend_score": trend_score, "gate_trend": gate_trend_pass,
         "vol_percentile": vol_percentile, "gate_vol": gate_volume_pass,
         "exec_score": exec_score, "gate_exec": gate_exec_pass,
