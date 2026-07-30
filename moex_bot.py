@@ -4461,6 +4461,62 @@ async def check_commodity_driver_alignment(ticker: str, tech_signal: str) -> tup
 
     return False, ""
 
+async def check_index_participation_alignment(ticker: str, tech_signal: str) -> tuple[bool, str]:
+    """
+    ФИЛЬТР ОТСТАВАНИЯ ОТ ИНДЕКСА (Index Participation):
+    Если IMOEX растет (>+0.3%), а наша акция падает/не растет (<=0.0%) — ЛОНГ заблокирован!
+    (В бумаге идет скрытая разгрузка крупного игрока).
+    """
+    tk = normalize_ticker(ticker)
+    profile = get_instrument_profile(tk)
+    if profile["tier"] > 2:
+        return False, "" # 3-й эшелон живет своей жизнью, фильтр только для 1-2 эшелона
+
+    is_long  = "LONG" in tech_signal
+    is_short = "SHORT" in tech_signal or "ВЫХОД" in tech_signal
+    if not (is_long or is_short):
+        return False, ""
+
+    try:
+        # Динамика индекса MOEX за 5 свечей 15m (~1 час)
+        figi_moex = MOEX_STOCKS.get("MOEX", (None,))[0]
+        if not figi_moex:
+            return False, ""
+
+        df_moex = await fetch_candles_tinkoff(figi_moex, "CANDLE_INTERVAL_15_MIN", 10)
+        if df_moex is None or len(df_moex) < 5:
+            return False, ""
+
+        close_moex_now  = float(df_moex["close"].iloc[-1])
+        close_moex_past = float(df_moex["close"].iloc[-5])
+        moex_move_pct   = (close_moex_now - close_moex_past) / close_moex_past * 100
+
+        # Динамика самой акции за этот же час
+        figi_stock = MOEX_STOCKS.get(tk, (None,))[0]
+        if not figi_stock:
+            return False, ""
+
+        df_stock = await fetch_candles_tinkoff(figi_stock, "CANDLE_INTERVAL_15_MIN", 10)
+        if df_stock is None or len(df_stock) < 5:
+            return False, ""
+
+        close_stock_now  = float(df_stock["close"].iloc[-1])
+        close_stock_past = float(df_stock["close"].iloc[-5])
+        stock_move_pct   = (close_stock_now - close_stock_past) / close_stock_past * 100
+
+        # ЛОГИКА 1: IMOEX растет (>=+0.3%), а акция падает/застряла (<=0.0%) -> Скрытая разгрузка!
+        if is_long and moex_move_pct >= 0.3 and stock_move_pct <= 0.0:
+            return True, f"Индекс IMOEX растет ({moex_move_pct:+.2f}%), но {tk} отстает ({stock_move_pct:+.2f}%) — В бумаге идет разгрузка!"
+
+        # ЛОГИКА 2: IMOEX падает (<=-0.3%), а акция упирается/растет (>=+0.1%) -> Шорт опасен
+        if is_short and moex_move_pct <= -0.3 and stock_move_pct >= 0.1:
+            return True, f"Индекс IMOEX падает ({moex_move_pct:+.2f}%), но {tk} упирается ({stock_move_pct:+.2f}%) — Локальная сила акции!"
+
+    except Exception as e:
+        logger.debug(f"Index participation check error {ticker}: {e}")
+
+    return False, ""
+
 async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None, run_ai: bool = True) -> dict | None:
     if mode_cfg is None:
         mode_cfg = TRADE_MODES["mid"]
@@ -4597,6 +4653,16 @@ async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None
     sector_check = check_signal_against_sector_modifier(sector, final_signal)
     try:
         driver_conflict, driver_warn = await check_commodity_driver_alignment(ticker, final_signal)
+        try:
+        index_part_conflict, index_part_warn = await check_index_participation_alignment(ticker, final_signal)
+    except Exception as idx_err:
+        index_part_conflict, index_part_warn = False, ""
+
+    if index_part_conflict:
+        if "CONFIRMED" in final_signal:
+            final_signal = final_signal.replace("CONFIRMED", "WEAK ⚠️ (индекс)")
+        elif "LONG" in final_signal or "SHORT" in final_signal:
+            tech_score = max(0, tech_score - 15)
     except Exception as drv_err:
         driver_conflict, driver_warn = False, ""
 
@@ -4665,13 +4731,14 @@ async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None
         "sl_tp": sl_tp, "supports": supports, "resistances": resistances, "candle": detect_candle_pattern(df_closed),
         "vol_ratio": round(_safe_vol_ratio(df_closed["vol_ratio"].iloc[-1]), 2), "time_warning": session.get("warning", ""),
         "calendar": cal_check, "dividend": div_check, "sector_modifier": sector_check,
-        "driver_warn": driver_warn, # <-- ДОБАВЛЕНО
+        "driver_warn": driver_warn,
+        "index_warn": index_part_warn, # <-- ДОБАВЛЕНО ДЛЯ ШАГА 4
         "liquidity_tier": liquidity_tier, "liquidity_warn": liquidity_warn,
         "candle_progress_pct": round(candle_progress_pct, 1), "candle_progress_note": candle_progress_note,
         "daily_atr_progress_pct": round(daily_atr_progress_pct, 1), "daily_atr_progress_note": daily_atr_progress_note,
         "price_anomaly": price_anomaly, "edisclosure_items": edisclosure_items[:3],
         "mtf_trends": mtf_trends, "daily_poc": daily_poc,
-    }
+}
 
 def format_analysis(result: dict, show_news: bool = True) -> str:
     if "error" in result:
@@ -4716,6 +4783,9 @@ def format_analysis(result: dict, show_news: bool = True) -> str:
 
     sec_mod = result.get("sector_modifier", {})
     drv_warn = result.get("driver_warn", "")
+    idx_warn = result.get("index_warn", "")
+    if idx_warn:
+        lines.append(f"🏛 <b>ИНДЕКС:</b> {idx_warn}")
     if drv_warn:
         lines.append(f"🛢 <b>ПОВОДЫРЬ:</b> {drv_warn}")
     if sec_mod.get("warning_ru"):
