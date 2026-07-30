@@ -4650,20 +4650,21 @@ async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None
 
     cal_check = check_calendar_block(ticker)
     div_check = check_dividend_cutoff(ticker)
-    sector_check = check_signal_against_sector_modifier(sector, final_signal)
+    # 1. Проверка геополитического модификатора сектора
+    try:
+        sector_check = check_signal_against_sector_modifier(sector, final_signal)
+    except Exception as sm_err:
+        logger.debug(f"check_signal_against_sector_modifier {ticker}: {sm_err}")
+        sector_check = {"conflict": False, "warning_ru": ""}
+
+    if sector_check.get("conflict") and "CONFIRMED" in final_signal:
+        final_signal = final_signal.replace("CONFIRMED", "WEAK ⚠️ (геополитика)")
+
+    # 2. Проверка сырьевого поводыря (Gold, Brent, Gas, USD/RUB)
     try:
         driver_conflict, driver_warn = await check_commodity_driver_alignment(ticker, final_signal)
-        try:
-        index_part_conflict, index_part_warn = await check_index_participation_alignment(ticker, final_signal)
-    except Exception as idx_err:
-        index_part_conflict, index_part_warn = False, ""
-
-    if index_part_conflict:
-        if "CONFIRMED" in final_signal:
-            final_signal = final_signal.replace("CONFIRMED", "WEAK ⚠️ (индекс)")
-        elif "LONG" in final_signal or "SHORT" in final_signal:
-            tech_score = max(0, tech_score - 15)
     except Exception as drv_err:
+        logger.debug(f"Commodity driver check error {ticker}: {drv_err}")
         driver_conflict, driver_warn = False, ""
 
     if driver_conflict:
@@ -4671,8 +4672,22 @@ async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None
             final_signal = final_signal.replace("CONFIRMED", "WEAK ⚠️ (сырьё)")
         elif "LONG" in final_signal or "SHORT" in final_signal:
             tech_score = max(0, tech_score - 15)
-    sl_tp = calculate_sl_tp_stocks(tech_signal, price, atr, supports, resistances, pd_levels=pd_levels)
 
+    # 3. Проверка фильтра отставания от Индекса MOEX
+    try:
+        index_part_conflict, index_part_warn = await check_index_participation_alignment(ticker, final_signal)
+    except Exception as idx_err:
+        logger.debug(f"Index participation check error {ticker}: {idx_err}")
+        index_part_conflict, index_part_warn = False, ""
+
+    if index_part_conflict:
+        if "CONFIRMED" in final_signal:
+            final_signal = final_signal.replace("CONFIRMED", "WEAK ⚠️ (индекс)")
+        elif "LONG" in final_signal or "SHORT" in final_signal:
+            tech_score = max(0, tech_score - 15)
+
+    sl_tp = calculate_sl_tp_stocks(tech_signal, price, atr, supports, resistances, pd_levels=pd_levels)
+    
     # 🟢 ВОССТАНОВЛЕН РАСЧЕТ ПРОГРЕССА СВЕЧИ
     candle_progress_pct  = 0.0
     candle_progress_note = ""
