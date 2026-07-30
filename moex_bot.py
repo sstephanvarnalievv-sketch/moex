@@ -7562,62 +7562,43 @@ async def _evaluate_and_edit_signal(app, sent_msg, s: dict, chat_id: int, tf: st
         logger.error(f"_evaluate_and_edit_signal error for {ticker}: {e}", exc_info=True)
 
 
-async def run_scanner_broadcast(app):
-    global _last_broadcast_signals
-    tf = "15m"
-    mode_cfg = TRADE_MODES["mid"]
-    wl = load_watchlist()
-    if not wl:
-        return
-    long_sigs, short_sigs, _, scan_stats = await _run_scan(wl, tf, mode_cfg, exclude_low_liquidity=True)
+# 1. Проверка геополитического модификатора сектора
+    try:
+        sector_check = check_signal_against_sector_modifier(sector, final_signal)
+    except Exception as sm_err:
+        logger.debug(f"check_signal_against_sector_modifier {ticker}: {sm_err}")
+        sector_check = {"conflict": False, "warning_ru": ""}
 
-    if scan_stats["failed_pct"] >= 50:
-        _scanner_failure_state["consecutive_data_failures"] += 1
-        return
+    if sector_check.get("conflict") and "CONFIRMED" in final_signal:
+        final_signal = final_signal.replace("CONFIRMED", "WEAK ⚠️ (геополитика)")
 
-    _scanner_failure_state["consecutive_data_failures"] = 0
-    all_sigs = long_sigs + short_sigs
-    if not all_sigs:
-        return
+    # 2. Проверка сырьевого поводыря (Gold, Brent, Gas, USD/RUB)
+    try:
+        driver_conflict, driver_warn = await check_commodity_driver_alignment(ticker, final_signal)
+    except Exception as drv_err:
+        logger.debug(f"Commodity driver check error {ticker}: {drv_err}")
+        driver_conflict, driver_warn = False, ""
 
-    new_sigs = [s for s in all_sigs if f"{s['ticker']}_{s['tech_signal']}" not in _last_broadcast_signals]
-    if not new_sigs:
-        return
+    if driver_conflict:
+        if "CONFIRMED" in final_signal:
+            final_signal = final_signal.replace("CONFIRMED", "WEAK ⚠️ (сырьё)")
+        elif "LONG" in final_signal or "SHORT" in final_signal:
+            tech_score = max(0, tech_score - 15)
 
-    for s in new_sigs[:5]:
-        _last_broadcast_signals.add(f"{s['ticker']}_{s['tech_signal']}")
-        direction = "LONG" if "LONG" in s["tech_signal"] else "SHORT"
-        _register_signal_time(s["ticker"], direction)
+    # 3. Проверка фильтра отставания от Индекса MOEX
+    try:
+        index_part_conflict, index_part_warn = await check_index_participation_alignment(ticker, final_signal)
+    except Exception as idx_err:
+        logger.debug(f"Index participation check error {ticker}: {idx_err}")
+        index_part_conflict, index_part_warn = False, ""
 
-        # 1. МГНОВЕННО формируем первичную карточку сигнала с плашкой ожидания ИИ
-        s["news_ai"] = {
-            "filter_status": "PENDING",
-            "event_weight": 0,
-            "summary": "⏳ AI анализ новостей, макрофона и ЦБ...",
-        }
-        initial_text = format_analysis(s)
+    if index_part_conflict:
+        if "CONFIRMED" in final_signal:
+            final_signal = final_signal.replace("CONFIRMED", "WEAK ⚠️ (индекс)")
+        elif "LONG" in final_signal or "SHORT" in final_signal:
+            tech_score = max(0, tech_score - 15)
 
-        sl_tp = s.get("sl_tp", {})
-        p  = s["price"]; sl = sl_tp.get("sl", 0)
-        t1 = sl_tp.get("tp1", 0); t2 = sl_tp.get("tp2", 0); t3 = sl_tp.get("tp3", 0)
-        key = f"{s['ticker']}_{direction}_{int(time.time())}"[-20:]
-        _cleanup_pending_trades()
-        _pending_trades[key] = {
-            "ticker": s["ticker"], "direction": direction,
-            "entry": p, "sl": sl, "tp1": t1, "tp2": t2, "tp3": t3,
-            "ts": time.time()
-        }
-        markup = InlineKeyboardMarkup([[InlineKeyboardButton(f"✅ Войти {s['ticker']} ({direction})", callback_data=f"enter2_{key}")]])
-
-        # 2. Отправляем карточку сигнала
-        for chat_id in SCANNER_CHAT_IDS:
-            try:
-                sent_msg = await app.bot.send_message(chat_id, initial_text, parse_mode="HTML", reply_markup=markup)
-                
-                # 3. Запускаем фоновый ИИ, который через 2 секунды ОТРЕДАКТИРУЕТ это же сообщение!
-                asyncio.create_task(_evaluate_and_edit_signal(app, sent_msg, s, chat_id, tf))
-            except Exception as e:
-                logger.warning(f"Broadcast failed for {chat_id}: {e}")
+    sl_tp = calculate_sl_tp_stocks(tech_signal, price, atr, supports, resistances, pd_levels=pd_levels)
             
 
     # Запускаем фоновый ИИ СРАЗУ ПОСЛЕ отправки тех-сигнала
