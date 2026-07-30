@@ -4501,9 +4501,12 @@ async def analyze_stock(ticker: str, tf: str = DEFAULT_TF, mode_cfg: dict = None
     macd_div   = detect_macd_divergence(df_closed)
     session    = get_session_phase()
 
-    tech_signal, tech_score, tech_reasons = compute_tech_score(
+    # 🟢 2.3: Прописываем тикер в свойства DataFrame и вызываем новый скоринг с профилями
+    df_closed.attrs["ticker"] = ticker
+    tech_signal, tech_score, tech_reasons, gates_summary = compute_tech_score(
         df_closed, effective_mode, imoex_regime=imoex_regime,
-        htf_trend=htf_trend, pd_levels=pd_levels, macd_div=macd_div)
+        htf_trend=htf_trend, pd_levels=pd_levels, macd_div=macd_div, df_daily=df_daily_res
+)
 
     price_anomaly = detect_price_anomaly(df_closed, tf)
     edisclosure_items: list = []
