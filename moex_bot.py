@@ -2129,36 +2129,39 @@ RSS_SOURCE_TIER = {
 }
 
 RUSSIAN_NEWS_RSS = [
+    # 1. Официальные деловые СМИ России (Топ-1)
     "https://www.moex.com/export/news.aspx?mode=rss",
     "https://www.interfax.ru/rss.asp",
     "https://tass.ru/rss/v2.xml",
     "https://www.kommersant.ru/RSS/news.xml",
-    "https://smart-lab.ru/blog/feed/",
-    "https://1prime.ru/export/rss2/index.xml",
-    "https://www.finam.ru/analysis/conews/rsspoint/",
-    "https://rbc.ru/rss",
-    
+    "https://www.vedomosti.ru/rss/news",                # <-- ДОБАВЛЕНО: Ведомости (Инсайды и налоги)
+    "https://smart-lab.ru/rss/",
+    "https://1prime.ru/export/rss2/index.xml",           # ПРАЙМ (Главное фин. агентство)
+    "https://www.finam.ru/analysis/conews/rsspoint/",   # Финам
+    "https://bcs-express.ru/rss",                        # <-- ДОБАВЛЕНО: БКС Экспресс (Отчёты и дивы)
+    "https://rssexport.rbc.ru/rbcnews/news/30/full.rss", # РБК
+
+    # 2. Ваш личный RSSHub на Railway (Топ-10 Telegram-каналов)
     _tg("interfaxonline"),   
     _tg("cbr_official"),     
-    _tg("markettwits"),      
+    _tg("markettwits"),      # #1 интрадей-канал
+    _tg("bbbreaking"),       # <-- ДОБАВЛЕНО: Раньше всех (Самый быстрый макро-канал)
     _tg("rosbiznessman"),    
     _tg("moexpert"),         
     _tg("smartlabonline"),   
     _tg("russianmacro"),     
     _tg("selfinvestor"),     
+    _tg("banksta"),          # <-- ДОБАВЛЕНО: Банкста (Банки и ЦБ)
 ]
 
 COMMODITY_NEWS_RSS = [
-    
+    # Мировые сырьевые и макро-ленты
     "https://oilprice.com/rss/main",
-    
     "https://www.mining.com/feed/",
-    
-    "https://www.kitco.com/rss/KitcoNews.xml",
-    
+    "https://www.kitco.com/news/rss/kitco-news",
     "https://www.marketwatch.com/rss/topstories",
-    
     "https://finance.yahoo.com/rss/2.0/headline?s=CL=F,GC=F,SI=F,HG=F",
+    "https://www.investing.com/rss/news_11.rss",        # <-- ДОБАВЛЕНО: Мировое сырьё (Investing)
 ]
 
 COMMODITY_SECTOR_MAP: dict[str, list[str]] = {
