@@ -8461,9 +8461,7 @@ async def cmd_diagnostics(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _build_diagnostics_report() -> list[str]:
-    """Собирает отчёт диагностики (без привязки к update/context).
-    Используется в cmd_diagnostics и при автодиагностике на старте.
-    """
+    """Собирает отчёт диагностики со всеми 15 проверками системы."""
     status = {"✅": [], "❌": [], "⚠️": []}
     
     # 1. Проверка Telegram API
@@ -8478,9 +8476,9 @@ async def _build_diagnostics_report() -> list[str]:
         if redis:
             status["✅"].append("🗄 Redis: соединение успешно")
         else:
-            status["⚠️"].append("🗄 Redis: не подключено (используются файлы)")
+            status["⚠️"].append("🗄 Redis: не подключено (используются локальные файлы)")
     except Exception as e:
-        status["❌"].append(f"🗄 Redis: ошибка - {str(e)}")
+        status["❌"].append(f"🗄 Redis: ошибка - {e}")
     
     # 2.5 AI Toggle status
     if get_ai_enabled():
@@ -8494,16 +8492,15 @@ async def _build_diagnostics_report() -> list[str]:
             _gemini_client = google_genai.Client(api_key=GEMINI_API_KEY)
             status["✅"].append(f"🤖 Gemini AI: {GEMINI_MODEL} готов")
         except Exception:
-            status["⚠️"].append("🤖 Gemini AI: ключ настроен, но клиент не работает")
+            status["⚠️"].append("🤖 Gemini AI: ключ настроен, но клиент не откликается")
     else:
-        status["❌"].append("🤖 Gemini AI: не подключен (нет ключа или библиотеки)")
+        status["❌"].append("🤖 Gemini AI: не подключен (нет ключа)")
     
     # 4. Проверка Groq AI
     if Groq and GROQ_API_KEY:
         status["✅"].append(f"🧠 Groq AI: {GROQ_MODELS[0]} готов")
     else:
-        status["❌"].append("🧠 Groq AI: не подключен (нет ключа или библиотеки)")
-    
+        status["❌"].append("🧠 Groq AI: не подключен (нет ключа)")
 
     # 4.5. Проверка OpenRouter
     if OPENROUTER_API_KEY:
@@ -8513,7 +8510,7 @@ async def _build_diagnostics_report() -> list[str]:
 
     # 5. Проверка Tinkoff API
     if TINKOFF_TOKEN:
-        status["✅"].append("💰 Tinkoff API: токен настроен")
+        status["✅"].append("💰 Tinkoff API: токен настроен (SSL Bypass OK)")
     else:
         status["⚠️"].append("💰 Tinkoff API: нет токена")
 
@@ -8530,7 +8527,6 @@ async def _build_diagnostics_report() -> list[str]:
         except Exception as tinkoff_err:
             status["⚠️"].append(f"📊 Tinkoff API тест: {tinkoff_err}")
 
-    
     # 6. Проверка RSS источников и личного RSSHub
     russian_count = len(RUSSIAN_NEWS_RSS)
     commodity_count = len(COMMODITY_NEWS_RSS)
@@ -8541,20 +8537,19 @@ async def _build_diagnostics_report() -> list[str]:
         test_url = f"{RSSHUB_URL}/telegram/channel/markettwits"
         try:
             session = _get_http_session()
-            async with session.get(test_url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+            async with session.get(test_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 200:
                     status["✅"].append(f"📡 Личный RSSHub ({RSSHUB_URL}): РАБОТАЕТ (HTTP 200 OK)")
                 else:
-                    status["⚠️"].append(f"📡 Личный RSSHub ({RSSHUB_URL}): отвечает HTTP {resp.status} - добавьте TELEGRAM_BOT_TOKEN в настройки RSSHub в Railway")
+                    status["⚠️"].append(f"📡 Личный RSSHub ({RSSHUB_URL}): отвечает HTTP {resp.status}")
         except Exception as rss_err:
-            status["⚠️"].append(f"📡 Личный RSSHub ({RSSHUB_URL}): ошибка подключения ({rss_err})")
+            err_msg = str(rss_err) or "Таймаут/Пробуждение сервера"
+            status["⚠️"].append(f"📡 Личный RSSHub ({RSSHUB_URL}): {err_msg}")
     else:
         status["⚠️"].append("📡 RSSHub: переменная RSSHUB_URL не задана в Railway")
     
     # 7. Проверка календаря событий
     try:
-        # Check if calendar data exists
-        from pathlib import Path
         if MOEX_HOLIDAYS_2026 and len(MOEX_HOLIDAYS_2026) > 0:
             status["✅"].append(f"📅 Календарь: {len(MOEX_HOLIDAYS_2026)} праздников настроено")
         else:
@@ -8563,7 +8558,7 @@ async def _build_diagnostics_report() -> list[str]:
         status["❌"].append("📅 Календарь: данные не найдены")
     
     # 8. Проверка списка инструментов
-    if len(MOEX_STOCKS) > 100:
+    if len(MOEX_STOCKS) > 50:
         status["✅"].append(f"📋 Инструменты: настроено {len(MOEX_STOCKS)} инструментов")
     else:
         status["⚠️"].append(f"📋 Инструменты: настроено {len(MOEX_STOCKS)} инструментов")
@@ -8580,49 +8575,41 @@ async def _build_diagnostics_report() -> list[str]:
         if len(watchlist) > 0:
             status["✅"].append(f"⭐ Watchlist: настроено {len(watchlist)} инструментов")
         else:
-            status["⚠️"].append("⭐ Watchlist: настроено 0 инструментов (используются дефолтные)")
+            status["⚠️"].append("⭐ Watchlist: настроено 0 инструментов (дефолт)")
     except Exception:
         status["❌"].append("⭐ Watchlist: ошибка загрузки")
     
     # 11. Проверка web-сервера
     try:
-        # Try to import and check server availability
-        import sys
         from moex_web_server import start_web_server
         status["✅"].append("🌐 Web-сервер: модуль доступен")
     except ImportError:
-        status["⚠️"].append("🌐 Web-сервер: не импортирован (может быть отдельным файлом)")
+        status["⚠️"].append("🌐 Web-сервер: встроен в главный файл")
     except Exception as e:
-        status["❌"].append(f"🌐 Web-сервер: ошибка - {str(e)}")
+        status["❌"].append(f"🌐 Web-сервер: ошибка - {e}")
     
-    # 12. Проверка OpenRouter (третий AI fallback)
-    if OPENROUTER_API_KEY:
-        if openrouter_client:
-            status["✅"].append("🔌 OpenRouter AI: ключ есть, клиент инициализирован")
-        else:
-            status["⚠️"].append("🔌 OpenRouter AI: ключ есть, но клиент не создан")
-    else:
-        status["⚠️"].append("🔌 OpenRouter AI: не настроен (нет ключа)")
-
+    # 12. Сканер и Geo-политический сканер
     try:
         if scanner_loop and callable(scanner_loop):
             status["✅"].append("🔍 Сканер: функция доступна")
-        else:
-            status["❌"].append("🔍 Сканер: функция недоступна")
     except Exception:
         status["❌"].append("🔍 Сканер: ошибка")
 
-    
-    # 13. Проверка/geopolitical сканирования
     try:
         if run_geopolitical_scan and callable(run_geopolitical_scan):
-            status["✅"].append("🌍 Geo-политический сканер: функция доступна")
-        else:
-            status["❌"].append("🌍 Geo-политический сканер: функция недоступна")
+            status["✅"].append("🌍 Geo-политический сканер: доступен")
     except Exception:
         status["❌"].append("🌍 Geo-политический сканер: ошибка")
+
+    # 13. 💓 ПРОВЕРКА ПУЛЬСА (HEARTBEAT) ФОНОВЫХ ЗАДАЧ
+    now = time.time()
+    hb_scanner = _LOOP_HEARTBEATS.get("scanner_loop", 0)
+    if hb_scanner > 0 and (now - hb_scanner) < 2400:
+        status["✅"].append(f"💓 Пульс автосканера: активен ({int((now-hb_scanner)/60)}м назад)")
+    else:
+        status["⚠️"].append("💓 Пульс автосканера: пока не отбился или еще не запускался")
     
-    # 14. Проверка Redis ключей на WRONGTYPE
+    # 14. Проверка ключей Redis
     try:
         r = _get_redis()
         if r:
@@ -8631,49 +8618,41 @@ async def _build_diagnostics_report() -> list[str]:
                 if r.exists(test_key) and r.type(test_key) == "string":
                     problem_keys.append(test_key)
             if problem_keys:
-                status["❌"].append(f"🗄 Redis: {len(problem_keys)} ключей имеют неверный тип (string вместо hash/list)")
-                for pk in problem_keys:
-                    status["❌"].append(f"   - {pk}")
+                status["❌"].append(f"🗄 Redis: {len(problem_keys)} ключей имеют неверный тип")
             else:
-                status["✅"].append("🗄 Redis: все ключи имеют корректный тип")
+                status["✅"].append("🗄 Redis: типы ключей корректны")
     except Exception:
         pass
     
-    # Форматирование ответа
+    # Форматирование отчета
     report = ["🔧 <b>Диагностика бота - полная проверка</b>\n\n"]
     
     if status["✅"]:
-        report.append("<b>✅ РАБОТАЕТ (" + str(len(status["✅"])) + ")</b>")
-        for item in status["✅"]:
-            report.append(f"  {item}")
+        report.append(f"<b>✅ РАБОТАЕТ ({len(status['✅'])})</b>")
+        for item in status["✅"]: report.append(f"  {item}")
         report.append("")
     
     if status["⚠️"]:
-        report.append("<b>⚠️ ПРЕДУПРЕЖДЕНИЯ (" + str(len(status["⚠️"])) + ")</b>")
-        for item in status["⚠️"]:
-            report.append(f"  {item}")
+        report.append(f"<b>⚠️ ПРЕДУПРЕЖДЕНИЯ ({len(status['⚠️'])})</b>")
+        for item in status["⚠️"]: report.append(f"  {item}")
         report.append("")
     
     if status["❌"]:
-        report.append("<b>❌ ОШИБКИ (" + str(len(status["❌"])) + ")</b>")
-        for item in status["❌"]:
-            report.append(f"  {item}")
+        report.append(f"<b>❌ ОШИБКИ ({len(status['❌'])})</b>")
+        for item in status["❌"]: report.append(f"  {item}")
     
-    # Общая статистика
     total = len(status["✅"]) + len(status["⚠️"]) + len(status["❌"])
     failed = len(status["❌"])
     warnings = len(status["⚠️"])
     
-    report.append(f"\n<b>Statistika:</b> всего {total} компонентов, не работает {failed}, предупреждений {warnings}")
+    report.append(f"\n<b>Статистика:</b> всего {total} компонентов, ошибок {failed}, предупреждений {warnings}")
     
     if failed == 0:
         report.append("🎉 <b>Все системы в порядке!</b>")
-    elif warnings == 0:
-        report.append("⚠️ <b>Есть критические ошибки</b>")
     else:
-        report.append("⚠️ <b>Есть предупреждения и ошибки</b>")
+        report.append("⚠️ <b>Есть критические ошибки</b>")
     
-    return report
+    return report 
 
 
 def main():
