@@ -6351,7 +6351,7 @@ async def cmd_close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     trades = load_trades()
-    target = args[0].upper()
+    target = normalize_ticker(args[0].upper())
 
     if target == "ALL":
         open_ids = [k for k, v in trades.items() if v["status"] in ("open", "tp1_hit", "tp2_hit")]
@@ -6359,30 +6359,47 @@ async def cmd_close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("📭 Нет открытых сделок.")
             return
         for tid in open_ids:
-            figi = MOEX_STOCKS.get(trades[tid]["ticker"], ("",))[0]
-            price = await fetch_last_price_tinkoff(figi) if figi else trades[tid]["entry"]
-            price = price or trades[tid]["entry"]
+            tk = trades[tid]["ticker"]
+            figi = MOEX_STOCKS.get(tk, ("",))[0]
+            price = await fetch_last_price_tinkoff(figi) if figi else None
+            if not price:
+                df_c = await fetch_candles_tinkoff(figi, "CANDLE_INTERVAL_5_MIN", 5) if figi else None
+                price = float(df_c["close"].iloc[-1]) if df_c is not None and len(df_c) > 0 else trades[tid]["entry"]
             close_trade(tid, "manual", price)
         await update.message.reply_text(f"✅ Закрыто сделок: {len(open_ids)}")
         return
 
     found = [(k, v) for k, v in trades.items()
-             if v["ticker"] == target and v["status"] in ("open", "tp1_hit", "tp2_hit")]
+             if normalize_ticker(v["ticker"]) == target and v["status"] in ("open", "tp1_hit", "tp2_hit")]
     if not found:
         await update.message.reply_text(f"ℹ️ Нет открытых сделок по {esc(target)}.")
         return
 
     trade_id, t = found[0]
-    figi = MOEX_STOCKS.get(target, ("",))[0]
-    price = await fetch_last_price_tinkoff(figi) if figi else t["entry"]
-    price = price or t["entry"]
+    tk = t["ticker"]
+    figi = MOEX_STOCKS.get(tk, ("",))[0]
+    
+    # ИСПРАВЛЕНИЕ: Многоуровневое получение реальной текущей цены рынка
+    price = await fetch_last_price_tinkoff(figi) if figi else None
+    if not price and figi:
+        df_c = await fetch_candles_tinkoff(figi, "CANDLE_INTERVAL_5_MIN", 5)
+        if df_c is not None and len(df_c) > 0:
+            price = float(df_c["close"].iloc[-1])
+    if not price:
+        df_moex = await fetch_candles_moex(tk, "CANDLE_INTERVAL_5_MIN", 5)
+        if df_moex is not None and len(df_moex) > 0:
+            price = float(df_moex["close"].iloc[-1])
+    if not price:
+        price = t["entry"]
+
     closed = close_trade(trade_id, "manual", price)
     pnl = closed.get("pnl_pct", 0) if closed else 0
     pnl_e = "📈" if pnl >= 0 else "📉"
 
     await update.message.reply_text(
-        f"🔒 <b>Сделка {esc(target)} закрыта вручную</b>\n"
-        f"Цена: {price:,.2f} ₽\n{pnl_e} Результат: {pnl:+.2f}%",
+        f"🔒 <b>Сделка {esc(tk)} закрыта вручную</b>\n"
+        f"Цена закрытия: <b>{price:,.2f} ₽</b>\n"
+        f"{pnl_e} Результат: <b>{pnl:+.2f}%</b>",
         parse_mode="HTML")
 
 async def _show_trades_history(update: Update, trades: dict):
