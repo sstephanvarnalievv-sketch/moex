@@ -4267,73 +4267,8 @@ def get_instrument_profile(ticker: str) -> dict:
         return DEFAULT_TIER2_PROFILE
     else:
         return DEFAULT_TIER3_PROFILE
-
-def compute_tech_score(df: pd.DataFrame, mode_cfg: dict,
-                       imoex_regime: dict = None,
-                       htf_trend: dict = None, pd_levels: dict = None,
-                       macd_div: str = "") -> tuple[str, int, list]:
-    row = df.iloc[-1]
-    rsi = float(row.get("rsi", 50) or 50)
-    macd_h = float(row.get("macd_hist", 0) or 0)
-    close = float(row["close"])
-    vol_r = _safe_vol_ratio(row.get("vol_ratio"))
-    regime = detect_market_regime(df)
-    candle = detect_candle_pattern(df)
-
-    long_gates,  short_gates  = 0, 0
-    long_r,      short_r      = [], []
-    vwap     = float(row.get("vwap",     0) or 0)
-    vwap_dev = float(row.get("vwap_dev", 0) or 0)
-    day_open = float(row.get("day_open", 0) or 0)
-    ema9     = float(row.get("ema9",     0) or 0)
-    ema20    = float(row.get("ema20",    0) or 0)
-    ema50    = float(row.get("ema50",    0) or 0)
-    has_vwap = vwap > 0
-
-    htf_bias = "neutral"
-    if htf_trend and htf_trend.get("trend") != "neutral":
-        htf_bias = htf_trend["trend"]
-
-    if has_vwap:
-        if close > vwap * 1.002:
-            long_gates += 1
-            long_r.append(f"Выше VWAP (+{vwap_dev:.2f}%)")
-        elif close < vwap * 0.998:
-            short_gates += 1
-            short_r.append(f"Ниже VWAP ({vwap_dev:.2f}%)")
-        else:
-            return "НЕТ СИГНАЛА", 0, ["Цена в зоне VWAP - нет чёткой позиции"]
-
-    if ema9 > 0 and ema20 > 0:
-        if close > ema9 > ema20:
-            long_gates += 1
-            long_r.append("EMA9 > EMA20 (бычий импульс)")
-        elif close < ema9 < ema20:
-            short_gates += 1
-            short_r.append("EMA9 < EMA20 (медвежий импульс)")
-
-    min_vol = mode_cfg.get("min_vol_ratio", 1.3)
-    if vol_r < min_vol:
-        return "НЕТ СИГНАЛА", 0, [f"Низкий объём (x{vol_r:.1f} < x{min_vol:.1f})"]
-
-    if long_gates > short_gates:
-        direction = "long"
-    elif short_gates > long_gates:
-        direction = "short"
-    else:
-        return "НЕТ СИГНАЛА", 0, ["Противоречивые сигналы"]
-
-    score = 50
-
-    # 1. ПОДKРУТКА: Повышенный вес за Дивергенцию MACD (было 18 -> стало 25!)
-    if macd_div:
-        if direction == "long" and "Бычья" in macd_div:
-            score += 25
-            long_r.append("🔥 " + macd_div)
-        elif direction == "short" and "Медвежья" in macd_div:
-            score += 25
-            short_r.append("🔥 " + macd_div)
-
+        
+        
 def compute_tech_score(df: pd.DataFrame, mode_cfg: dict,
                        imoex_regime: dict = None,
                        htf_trend: dict = None, pd_levels: dict = None,
@@ -4343,20 +4278,14 @@ def compute_tech_score(df: pd.DataFrame, mode_cfg: dict,
     Вычисляет 4 независимых Суб-скора. Сигнал выдается ТОЛЬКО если ВСЕ 4 Гейта возвращают PASS.
     """
     row = df.iloc[-1]
-    rsi = float(row.get("rsi", 50) or 50)
-    macd_h = float(row.get("macd_hist", 0) or 0)
     close = float(row["close"])
     vol_r = _safe_vol_ratio(row.get("vol_ratio"))
-    regime = detect_market_regime(df)
-    candle = detect_candle_pattern(df)
-
-    vwap     = float(row.get("vwap",     0) or 0)
+    vwap  = float(row.get("vwap", 0) or 0)
     vwap_dev = float(row.get("vwap_dev", 0) or 0)
-    ema9     = float(row.get("ema9",     0) or 0)
-    ema20    = float(row.get("ema20",    0) or 0)
+    ema9  = float(row.get("ema9", 0) or 0)
+    ema20 = float(row.get("ema20", 0) or 0)
     has_vwap = vwap > 0
 
-    # Определяем направление
     long_gates, short_gates = 0, 0
     reasons = []
 
@@ -4379,7 +4308,7 @@ def compute_tech_score(df: pd.DataFrame, mode_cfg: dict,
     else:
         return "НЕТ СИГНАЛА", 0, ["Нет чёткого трендового направления"], {}
 
-    # 🚪 GATE 1: TREND SCORE (0-100)
+    # 🚪 GATE 1: TREND SCORE
     trend_score = 50
     if direction == "long" and close > vwap: trend_score += 15
     if direction == "short" and close < vwap: trend_score += 15
@@ -4388,12 +4317,12 @@ def compute_tech_score(df: pd.DataFrame, mode_cfg: dict,
     if htf_trend and htf_trend.get("trend") == ("bull" if direction == "long" else "bear"):
         trend_score += 15
 
-    # 🚪 GATE 2: VOLUME SCORE (Volume Percentile 0-100%)
+    # 🚪 GATE 2: VOLUME SCORE (Percentile)
     vol_percentile = calculate_volume_percentile(df, df_daily)
     volume_score   = vol_percentile
     reasons.append(f"Объём: {vol_percentile}-й перцентиль за 30d (x{vol_r:.1f})")
 
-    # 🚪 GATE 3: EXECUTION SCORE (Качество свечи и входа 0-100)
+    # 🚪 GATE 3: EXECUTION SCORE
     exec_score = 75
     try:
         last_high = float(df["high"].iloc[-1])
@@ -4407,13 +4336,11 @@ def compute_tech_score(df: pd.DataFrame, mode_cfg: dict,
     except Exception:
         pass
 
-    # ПРОВЕРКА ПРОХОЖДЕНИЯ ШЛЮЗОВ (ГЕЙТЫ ПО ПРОФИЛЮ АКЦИИ С УЧЕТОМ УТРА)
     now_hour = msk_now().hour
     is_morning = 7 <= now_hour < 10
 
     profile = get_instrument_profile(df.attrs.get("ticker", ""))
     min_trend = profile["min_trend"]
-    # Утром понижаем порог объема на 15%, так как рынок только просыпается
     min_vol_p = max(35, profile["min_vol_percentile"] - (15 if is_morning else 0))
 
     gate_trend_pass  = trend_score >= min_trend
@@ -4434,7 +4361,7 @@ def compute_tech_score(df: pd.DataFrame, mode_cfg: dict,
 
     total_score = int(round((trend_score + volume_score + exec_score) / 3))
     return signal, total_score, reasons, gates_summary
-    
+
 
 def calculate_daily_poc(df_daily) -> float | None:
     """
