@@ -555,12 +555,15 @@ def _cleanup_pending_trades():
 _http_session: aiohttp.ClientSession | None = None
 
 def _get_http_session() -> aiohttp.ClientSession:
-    """Возвращает единую HTTP-сессию для всего приложения."""
+    """Возвращает единую HTTP-сессию с отключенной строгой проверкой SSL (для работы с сертификатами Минцифры/Т-Банка)."""
     global _http_session
     if _http_session is None or _http_session.closed:
         timeout = aiohttp.ClientTimeout(total=15)
+        # ИСПРАВЛЕНИЕ: ssl=False отключает сбои сертификатов НУЦ Минцифры на Railway
+        connector = aiohttp.TCPConnector(ssl=False)
         _http_session = aiohttp.ClientSession(
             timeout=timeout,
+            connector=connector,
             headers={"User-Agent": "Mozilla/5.0 (compatible; MOEXBot/1.0)"},
         )
     return _http_session
