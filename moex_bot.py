@@ -6283,58 +6283,62 @@ async def cmd_update_figi(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append("↔️ Они больше не будут мешать сканированию.")
         await msg.edit_text("\n".join(lines))
 
+@admin_only
 async def cmd_open_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     args = context.args
     if len(args) < 7:
         await update.message.reply_text(
-            "📝 <b>Открыть сделку:</b>\n"
-            "<code>/open_trade TICKER LONG/SHORT ENTRY SL TP1 TP2 TP3</code>\n\n"
-            "Пример:\n<code>/open_trade SBER LONG 320.5 316.0 325.0 330.0 337.0</code>\n\n"
-            "Или нажми кнопку <b>✅ Войти в сделку</b> в анализе.",
+            "📝 <b>Открыть сделку вручную:</b>\n"
+            "<code>/open_trade TICKER LONG/SHORT ENTRY SL TP1 TP2 TP3</code>",
             parse_mode="HTML")
         return
     try:
-        ticker = args[0].upper()
+        ticker    = normalize_ticker(args[0])
         direction = args[1].upper()
-        entry = float(args[2])
-        sl = float(args[3])
-        tp1 = float(args[4])
-        tp2 = float(args[5])
-        tp3 = float(args[6])
+        entry     = float(args[2])
+        sl        = float(args[3])
+        tp1       = float(args[4])
+        tp2       = float(args[5])
+        tp3       = float(args[6])
     except (ValueError, IndexError):
-        await update.message.reply_text("❌ Неверный формат. Пример: /open_trade SBER LONG 320.5 316.0 325.0 330.0 337.0")
+        await update.message.reply_text("❌ Неверный формат чисел.")
         return
+
     if ticker not in MOEX_STOCKS:
         await update.message.reply_text(f"❌ Тикер {esc(ticker)} не найден.")
         return
     if direction not in ("LONG", "SHORT"):
         await update.message.reply_text("❌ Направление должно быть LONG или SHORT.")
         return
-    if entry <= 0 or sl <= 0:
-        await update.message.reply_text("❌ Цена входа и SL должны быть больше нуля.")
-        return
+
+    # 📐 СТРОГАЯ ВАЛИДАЦИЯ ПОРЯДКА ЦЕН
+    if direction == "LONG":
+        if not (sl < entry < tp1 < tp2 < tp3):
+            await update.message.reply_text("❌ Для LONG порядок цен должен быть: SL < Entry < TP1 < TP2 < TP3")
+            return
+    else:
+        if not (sl > entry > tp1 > tp2 > tp3):
+            await update.message.reply_text("❌ Для SHORT порядок цен должен быть: SL > Entry > TP1 > TP2 > TP3")
+            return
 
     tf = get_user_state(chat_id)["tf"]
     try:
-        trade_id = open_trade(ticker, direction, entry, sl, tp1, tp2, tp3, chat_id, tf)
+        trade_id = await open_trade_safe(ticker, direction, entry, sl, tp1, tp2, tp3, chat_id, tf)
     except ValueError as e:
         await update.message.reply_text(f"❌ Не удалось открыть сделку: {e}")
         return
-    direction_e = "🟩 LONG" if direction == "LONG" else "🟥 SHORT"
+
     risk_pct = abs(entry - sl) / entry * 100
+    direction_e = "🟩 LONG" if direction == "LONG" else "🟥 SHORT"
 
     await update.message.reply_text(
-        f"✅ <b>Сделка открыта!</b>\n\n"
+        f"✅ <b>Сделка открыта и добавлена в атомарный мониторинг!</b>\n\n"
         f"<b>{esc(ticker)}</b> {direction_e}\n"
-        f"Вход: {entry:,.2f} ₽  |  Риск: {risk_pct:.1f}%\n"
-        f"SL: {sl:,.2f} ₽\n"
-        f"TP1: {tp1:,.2f} ₽\n"
-        f"TP2: {tp2:,.2f} ₽\n"
-        f"TP3: {tp3:,.2f} ₽\n\n"
-        f"Мониторинг активен. Алерты при достижении уровней или тайм-ауте.\n/trades - все позиции",
+        f"Вход: {entry:,.2f} ₽ | Риск: {risk_pct:.1f}%\n"
+        f"SL: {sl:,.2f} ₽ | TP1: {tp1:,.2f} ₽ | TP2: {tp2:,.2f} ₽ | TP3: {tp3:,.2f} ₽",
         parse_mode="HTML"
-    )
+)
 
 async def cmd_close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
