@@ -63,6 +63,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger("moex_railway_bot")
 
+from functools import wraps
+
+# === 🔒 ЗАЩИТА АДМИНИСТРИРОВАНИЯ (AUTH DECORATOR) ===
+def admin_only(func):
+    """Декоратор: ограничивает выполнение команды только для ADMIN_CHAT_ID."""
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        user_id = str(update.effective_chat.id) if update.effective_chat else ""
+        if ADMIN_CHAT_ID and user_id != ADMIN_CHAT_ID:
+            await update.message.reply_text("⛔️ <b>Эта команда доступна только администратору бота.</b>", parse_mode="HTML")
+            return
+        return await func(update, context, *args, **kwargs)
+    return wrapper
+
+# === 🔐 АТОМАРНЫЙ ЗАМОК ДЛЯ ХРАНИЛИЩА СДЕЛОК ===
+_TRADE_STORE_LOCK = asyncio.Lock()
+
+# === HEARTBEAT ПУЛЬС ДЛЯ ФОНОВЫХ ЗАДАЧ ===
+_LOOP_HEARTBEATS: dict[str, float] = {}
+
+def _update_heartbeat(loop_name: str) -> None:
+    _LOOP_HEARTBEATS[loop_name] = time.time()
+
 if google_genai and GEMINI_API_KEY:
     try:
         _gemini_client = google_genai.Client(api_key=GEMINI_API_KEY)
@@ -250,14 +273,58 @@ CANONICAL_ALIASES = {
     "CNRU":   "CIAN",
     "OZONRU": "OZON",
     "YDEXRU": "YDEX",
-    "AGRO":   "RAGR",  # Старый тикер ГДР Русагро
-    "RARG":   "RAGR",  # Защита от опечатки
+    "AGRO":   "RAGR",
+    "RARG":   "RAGR",
+    "POLY":   "PLZL",
 }
 
 def normalize_ticker(ticker: str) -> str:
-    """Приводит тикеры-алиасы (TCSG, FIXR) к единому коду (T, FIXP)."""
+    """Приводит дублирующие тикеры к единому каноническому коду."""
     t = (ticker or "").upper().strip()
     return CANONICAL_ALIASES.get(t, t)
+
+def calculate_volume_percentile(df_closed: pd.DataFrame, df_daily: pd.DataFrame = None) -> int:
+    """Вычисляет относительный перцентиль объема за 30 дней (0-100%)."""
+    try:
+        if df_daily is not None and len(df_daily) >= 15:
+            hist_vols = df_daily["volume"].dropna().values
+            cur_vol   = float(df_closed["volume"].iloc[-1]) * 4
+            percentile = (hist_vols < cur_vol).mean() * 100
+            return int(round(percentile))
+        if len(df_closed) >= 20:
+            hist_vols = df_closed["volume"].dropna().tail(100).values
+            cur_vol   = float(df_closed["volume"].iloc[-1])
+            percentile = (hist_vols < cur_vol).mean() * 100
+            return int(round(percentile))
+    except Exception as e:
+        logger.debug(f"Volume percentile error: {e}")
+    return 50
+
+# === ПРОФИЛИ АКЦИЙ MOEX (Tier 1, Tier 2, Tier 3) ===
+INSTRUMENT_PROFILES: dict[str, dict] = {
+    "SBER":  {"tier": 1, "min_trend": 65, "min_vol_percentile": 50, "news_weight": 1.0},
+    "SBERP": {"tier": 1, "min_trend": 65, "min_vol_percentile": 50, "news_weight": 1.0},
+    "GAZP":  {"tier": 1, "min_trend": 65, "min_vol_percentile": 50, "news_weight": 1.2},
+    "LKOH":  {"tier": 1, "min_trend": 65, "min_vol_percentile": 50, "news_weight": 1.0},
+    "ROSN":  {"tier": 1, "min_trend": 65, "min_vol_percentile": 50, "news_weight": 1.0},
+    "NVTK":  {"tier": 1, "min_trend": 65, "min_vol_percentile": 50, "news_weight": 1.1},
+    "YDEX":  {"tier": 1, "min_trend": 65, "min_vol_percentile": 50, "news_weight": 1.0},
+    "T":     {"tier": 1, "min_trend": 65, "min_vol_percentile": 50, "news_weight": 1.0},
+    "GMKN":  {"tier": 1, "min_trend": 65, "min_vol_percentile": 50, "news_weight": 1.1},
+    "PLZL":  {"tier": 1, "min_trend": 65, "min_vol_percentile": 50, "news_weight": 1.2},
+}
+
+DEFAULT_TIER2_PROFILE = {"tier": 2, "min_trend": 60, "min_vol_percentile": 65, "news_weight": 1.0}
+DEFAULT_TIER3_PROFILE = {"tier": 3, "min_trend": 55, "min_vol_percentile": 75, "news_weight": 0.8}
+
+def get_instrument_profile(ticker: str) -> dict:
+    tk = normalize_ticker(ticker)
+    if tk in INSTRUMENT_PROFILES:
+        return INSTRUMENT_PROFILES[tk]
+    elif tk in LIQUID_TICKERS:
+        return DEFAULT_TIER2_PROFILE
+    else:
+        return DEFAULT_TIER3_PROFILE
 
 FUTURES = {
     "SiU6":  ("FUTSI0926000", "Доллар/Рубль (Si)",    "валюта",   1.0,    1000),  
